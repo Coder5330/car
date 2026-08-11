@@ -21,6 +21,7 @@ const AI_GROUND_Y = PLAYER_GROUND_Y + LANE_GAP;
 const SEG_LEN = 900;
 const BUFFER_LEN = 160;
 const BASE_DRIVE_SPEED = 0.45; // wheel angular velocity target
+const DRIVE_TORQUE_GAIN = 0.22; // how hard the wheel motor pushes toward that target (see onBeforeUpdate)
 const MIN_WHEEL_R = 15;
 const MAX_WHEEL_R = 46;
 
@@ -31,12 +32,21 @@ const MAX_WHEEL_R = 46;
 const CAT_PLAYER_GROUND = 0x0002;
 const CAT_AI_GROUND = 0x0004;
 
-// Camera "look": a diagonal third-person view instead of flat side-on.
-// This is a classic pseudo-3D trick (shear + vertical squash) rather than
-// true 3D — it keeps the 2D physics that makes drawn wheels genuinely climb
-// terrain, while reading as an angled chase-cam instead of a flat 2D strip.
-const VIEW_SKEW = 0.42;
-const VIEW_SQUASH = 0.6;
+// --- 3D presentation ---
+// Physics stays flat 2D (that's what makes a drawn wheel genuinely climb a
+// step); this just maps that 2D simulation into a real 3D scene instead of
+// faking depth with a 2D shear. Mapping convention, used everywhere below:
+//   physics x (progress)      -> scene -Z (forward, away from camera)
+//   physics y (height)        -> scene  Y (up), relative to that car's own ground line
+//   which lane (player vs AI) -> a FIXED scene X offset (not physics-derived)
+const LANE_X_OFFSET = 170;      // how far apart the two lanes sit, left/right
+const LANE_VISUAL_WIDTH = 190;  // how wide each lane's terrain looks
+const TRACK_HALF_WIDTH = 34;    // left/right wheel spacing, purely visual
+const WHEEL_THICKNESS = 16;
+const TERRAIN_COLOR3D = {
+  flat: 0x8fd66b, finish: 0x8fd66b, stairs: 0xc9a17a, sand: 0xe9d18c,
+  water: 0x5fb3e0, ice: 0xdbeeff, rocks: 0x9a9a95, steep: 0xc9a17a
+};
 
 const TERRAIN_TYPES = ['stairs', 'sand', 'water', 'ice', 'rocks', 'steep'];
 const TERRAIN_LABEL = {
@@ -54,7 +64,6 @@ const playerId = (() => {
 // DOM
 // ---------------------------------------------------------------------------
 const worldCanvas = document.getElementById('world');
-const wctx = worldCanvas.getContext('2d');
 const drawCanvas = document.getElementById('drawCanvas');
 const dctx = drawCanvas.getContext('2d');
 
@@ -75,9 +84,36 @@ const bpWidth = document.getElementById('bpWidth');
 const bpTread = document.getElementById('bpTread');
 const bpIrreg = document.getElementById('bpIrreg');
 
+// ---------------------------------------------------------------------------
+// 3D scene (Three.js) — persists across races; only the terrain/car meshes
+// inside it get rebuilt each time initWorld() runs.
+// ---------------------------------------------------------------------------
+const three = {};
+
+function initThreeScene() {
+  three.renderer = new THREE.WebGLRenderer({ canvas: worldCanvas, antialias: true });
+  three.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+  three.scene = new THREE.Scene();
+  three.scene.background = new THREE.Color(0x8ec9f0);
+  three.scene.fog = new THREE.Fog(0x8ec9f0, 1600, 4600);
+
+  three.camera = new THREE.PerspectiveCamera(58, 1, 1, 6000);
+
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x33424f, 0.9);
+  three.scene.add(hemi);
+  const sun = new THREE.DirectionalLight(0xfff3d6, 0.9);
+  sun.position.set(-300, 500, 200);
+  three.scene.add(sun);
+  three.scene.add(new THREE.AmbientLight(0xffffff, 0.25));
+}
+
 function resizeWorldCanvas() {
-  worldCanvas.width = worldCanvas.clientWidth;
-  worldCanvas.height = worldCanvas.clientHeight;
+  if (!three.renderer) return;
+  const w = worldCanvas.clientWidth, h = worldCanvas.clientHeight;
+  three.renderer.setSize(w, h, false);
+  three.camera.aspect = w / h;
+  three.camera.updateProjectionMatrix();
 }
 window.addEventListener('resize', resizeWorldCanvas);
 
@@ -113,54 +149,54 @@ function buildGroundBodies(world, segments, baseY, category) {
   const sandZones = [];
   const filter = { category };
 
+  // Creates a ground box AND tags it with the raw dimensions/angle used to
+  // build it, so the 3D layer can reconstruct an exactly matching mesh
+  // later without re-deriving geometry from Matter's world-space vertices.
+  function addBox(x, y, w, h, angle, friction, groundType) {
+    const b = Bodies.rectangle(x, y, w, h, {
+      isStatic: true, friction, angle: angle || 0, collisionFilter: filter, render: {}
+    });
+    b.groundType = groundType;
+    b._w = w; b._h = h; b._angle = angle || 0;
+    bodies.push(b);
+    return b;
+  }
+
   for (const seg of segments) {
     const w = seg.len;
     const cx = seg.x0 + w / 2;
-    const opts = { isStatic: true, friction: 0.8, render: {}, collisionFilter: filter };
 
     switch (seg.type) {
       case 'flat':
-      case 'finish': {
-        const b = Bodies.rectangle(cx, baseY + 20, w, 40, { ...opts, friction: 0.8 });
-        b.groundType = seg.type; bodies.push(b);
+      case 'finish':
+        addBox(cx, baseY + 20, w, 40, 0, 0.8, seg.type);
         break;
-      }
       case 'stairs': {
         const stepW = 60, stepH = 24, steps = Math.floor(w / stepW);
         for (let i = 0; i < steps; i++) {
           const rise = Math.min(i, 6) * stepH; // cap so it plateaus
           const bx = seg.x0 + i * stepW + stepW / 2;
-          const by = baseY - rise + 20;
-          const b = Bodies.rectangle(bx, by, stepW + 2, 40 + rise, { ...opts, friction: 0.95 });
-          b.groundType = 'stairs'; bodies.push(b);
+          addBox(bx, baseY - rise + 20, stepW + 2, 40 + rise, 0, 0.95, 'stairs');
         }
         break;
       }
-      case 'sand': {
-        const b = Bodies.rectangle(cx, baseY + 20, w, 40, { ...opts, friction: 1.1 });
-        b.groundType = 'sand'; bodies.push(b);
+      case 'sand':
+        addBox(cx, baseY + 20, w, 40, 0, 1.1, 'sand');
         sandZones.push(seg);
         break;
-      }
-      case 'water': {
-        const b = Bodies.rectangle(cx, baseY + 20, w, 40, { ...opts, friction: 0.3 });
-        b.groundType = 'water'; bodies.push(b);
+      case 'water':
+        addBox(cx, baseY + 20, w, 40, 0, 0.3, 'water');
         waterZones.push(seg);
         break;
-      }
-      case 'ice': {
-        const b = Bodies.rectangle(cx, baseY + 20, w, 40, { ...opts, friction: 0.02 });
-        b.groundType = 'ice'; bodies.push(b);
+      case 'ice':
+        addBox(cx, baseY + 20, w, 40, 0, 0.02, 'ice');
         break;
-      }
       case 'rocks': {
         const chunk = 45, n = Math.floor(w / chunk);
         for (let i = 0; i < n; i++) {
           const bump = (Math.sin(i * 1.7) * 0.5 + (Math.random() - 0.5)) * 16;
           const bx = seg.x0 + i * chunk + chunk / 2;
-          const by = baseY + 20 - bump;
-          const b = Bodies.rectangle(bx, by, chunk + 2, 40 + bump, { ...opts, friction: 0.95 });
-          b.groundType = 'rocks'; bodies.push(b);
+          addBox(bx, baseY + 20 - bump, chunk + 2, 40 + bump, 0, 0.95, 'rocks');
         }
         break;
       }
@@ -168,8 +204,7 @@ function buildGroundBodies(world, segments, baseY, category) {
         const angle = -0.35; // radians, climbing
         const len = Math.hypot(w, w * Math.tan(0.35));
         const rise = w * Math.tan(0.35);
-        const b = Bodies.rectangle(cx, baseY + 20 - rise / 2, len, 40, { ...opts, friction: 0.95, angle });
-        b.groundType = 'steep'; bodies.push(b);
+        addBox(cx, baseY + 20 - rise / 2, len, 40, angle, 0.95, 'steep');
         break;
       }
     }
@@ -234,15 +269,20 @@ function defaultWheelPoints(n = 16, r = 60) {
 // ---------------------------------------------------------------------------
 // Car
 // ---------------------------------------------------------------------------
-function createCar(startX, color, group, laneGroundY, laneMask) {
+const PLAYER_COLOR = '#e8e6df';
+const AI_COLOR = '#5a6b7a';
+
+function createCar(startX, color, group, laneGroundY, laneMask, laneSceneX) {
   const chassis = Bodies.rectangle(startX, laneGroundY - 60, 96, 26, {
     density: 0.0022, friction: 0.4, collisionFilter: { group, mask: laneMask },
     render: { fillStyle: color }
   });
-  const car = { chassis, color, group, mask: laneMask, groundY: laneGroundY,
-    wheelA: null, wheelB: null, cA: null, cB: null,
+  const car = { chassis, color, group, mask: laneMask, groundY: laneGroundY, laneSceneX,
+    wheelA: null, wheelB: null, cA: null, cB: null, mesh3D: null,
     driveMul: 1, currentSegIndex: -1, telemetry: null, finished: false, finishTime: null,
     flippedSince: null, stuckAccum: 0 };
+
+  build3DCarMeshes(car);
   mountWheels(car, defaultWheelPoints(), { maxR: 60, widthRatio: 1, irregularity: 0, protrusions: 0, centroid: { x: 0, y: 0 } });
 
   // Spawn the whole car seated right on the ground (tiny 3px gap for a
@@ -253,6 +293,7 @@ function createCar(startX, color, group, laneGroundY, laneMask) {
   Body.translate(car.chassis, { x: 0, y: dy });
   Body.translate(car.wheelA, { x: 0, y: dy });
   Body.translate(car.wheelB, { x: 0, y: dy });
+  sync3DCar(car);
 
   return car;
 }
@@ -286,15 +327,16 @@ function mountWheels(car, points, features) {
     Body.setAngularVelocity(w, prevAngularVel);
   });
 
-  // Small give, not a stretchy spring: stiffness 1 / length 0 (last version)
-  // looked mechanically dead; stiffness 0.45 (previous fix) let the wheels
-  // physically tear away from the chassis under constant drive torque —
-  // that's the "wheels left behind" bug. This lands in between: enough
-  // give to feel like suspension, stiff enough that it can't stretch out.
+  // Fully rigid pin, not a spring. A spring (any stiffness under 1) fights a
+  // losing battle against how the wheel is driven below — since the wheel's
+  // spin is forced every frame regardless of load, it acts like an infinite-
+  // power motor, and any spring eventually gets stretched out by it. That's
+  // what caused the wheels to visibly tear away from the chassis. A rigid
+  // pin physically cannot stretch, so this failure mode is gone entirely.
   const constraints = offsets.map((off, i) => Constraint.create({
     bodyA: car.chassis, pointA: off,
     bodyB: wheels[i], pointB: { x: 0, y: 0 },
-    stiffness: 0.9, damping: 0.25, length: 3
+    stiffness: 1, length: 0
   }));
 
   World.add(world, [...wheels, ...constraints]);
@@ -302,10 +344,98 @@ function mountWheels(car, points, features) {
   car.cA = constraints[0]; car.cB = constraints[1];
   car.wheelFeatures = features;
   car.wheelRadius = radius;
+
+  if (car.mesh3D) updateWheelMesh3D(car, vertices);
 }
 
-const PLAYER_COLOR = '#e8e6df';
-const AI_COLOR = '#5a6b7a';
+// ---------------------------------------------------------------------------
+// 3D meshes for a car: a box chassis + 4 visual wheels (front/rear pairs,
+// left+right of each). Physics only has one wheel per axle (side-view sim),
+// so each physics wheel drives a symmetric left/right pair of meshes that
+// share its rotation — gives a normal-looking 4-wheeled vehicle without
+// adding a lateral dimension to the underlying 2D physics.
+// ---------------------------------------------------------------------------
+function build3DCarMeshes(car) {
+  const bodyColor = new THREE.Color(car.color);
+  const chassisMat = new THREE.MeshStandardMaterial({ color: bodyColor, flatShading: true, roughness: 0.6 });
+  const cabMat = new THREE.MeshStandardMaterial({ color: bodyColor.clone().multiplyScalar(0.85), flatShading: true, roughness: 0.6 });
+
+  const group = new THREE.Group();
+  const chassisMesh = new THREE.Mesh(new THREE.BoxGeometry(58, 22, 96), chassisMat);
+  group.add(chassisMesh);
+  const cabMesh = new THREE.Mesh(new THREE.BoxGeometry(44, 20, 40), cabMat);
+  cabMesh.position.set(0, 20, -10);
+  group.add(cabMesh);
+
+  const placeholderGeo = new THREE.CylinderGeometry(19, 19, WHEEL_THICKNESS, 12);
+  placeholderGeo.rotateZ(Math.PI / 2);
+  const wheelMat = new THREE.MeshStandardMaterial({
+    color: car.color === PLAYER_COLOR ? 0xf2c14e : 0x3ddc97, flatShading: true, roughness: 0.7
+  });
+
+  const wheelFL = new THREE.Mesh(placeholderGeo, wheelMat);
+  const wheelFR = new THREE.Mesh(placeholderGeo, wheelMat);
+  const wheelRL = new THREE.Mesh(placeholderGeo, wheelMat);
+  const wheelRR = new THREE.Mesh(placeholderGeo, wheelMat);
+  [wheelFL, wheelFR, wheelRL, wheelRR].forEach(m => group.add(m));
+
+  three.scene.add(group);
+  car.mesh3D = { group, chassisMesh, wheelFL, wheelFR, wheelRL, wheelRR };
+}
+
+// Rebuilds the wheel meshes' geometry from the same local vertices used for
+// the physics body, so what you drew is exactly what climbs the terrain AND
+// exactly what's shown — extruded sideways into a real 3D tire profile.
+function updateWheelMesh3D(car, localVertices) {
+  const shape = new THREE.Shape();
+  localVertices.forEach((v, i) => i === 0 ? shape.moveTo(v.x, -v.y) : shape.lineTo(v.x, -v.y));
+  shape.closePath();
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: WHEEL_THICKNESS, bevelEnabled: false, steps: 1 });
+  geo.rotateY(Math.PI / 2);
+  geo.translate(-WHEEL_THICKNESS / 2, 0, 0);
+
+  const m = car.mesh3D;
+  const oldGeo = m.wheelFL.geometry, oldGeo2 = m.wheelRL.geometry;
+  [m.wheelFL, m.wheelFR].forEach(w => { w.geometry = geo; });
+  const geo2 = geo.clone();
+  [m.wheelRL, m.wheelRR].forEach(w => { w.geometry = geo2; });
+  if (oldGeo && oldGeo.dispose) oldGeo.dispose();
+  if (oldGeo2 && oldGeo2.dispose && oldGeo2 !== oldGeo) oldGeo2.dispose();
+}
+
+// Copies live physics transforms onto the 3D meshes. Mapping convention:
+// physics x (progress) -> scene -Z, physics y (height, relative to this
+// car's own ground line) -> scene Y, lane -> fixed scene X.
+function sync3DCar(car) {
+  const m = car.mesh3D;
+  if (!m) return;
+  const gx = car.laneSceneX;
+  const toScene = (body) => ({
+    x: gx, y: -(body.position.y - car.groundY), z: -body.position.x
+  });
+
+  const cp = toScene(car.chassis);
+  m.group.position.set(cp.x, cp.y, cp.z);
+  m.group.rotation.x = -car.chassis.angle;
+
+  if (car.wheelA && car.wheelB) {
+    // wheelA/B positions are already relative to the chassis via the pin
+    // constraint, but they carry their own angle (spin) — apply that spin
+    // in the chassis' local frame. mountWheels puts wheelA (rear) at
+    // physics offset x=-32 and wheelB (front) at x=+32; since the global
+    // mapping is scene-Z = -physics-x, the LOCAL z offsets are the mirror
+    // of those physics offsets (rear -> +Z, front -> -Z).
+    const localOffsetRear = 32, localOffsetFront = -32;
+    [m.wheelRL, m.wheelRR].forEach(w => {
+      w.position.set(w === m.wheelRL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, 16, localOffsetRear);
+      w.rotation.x = -car.wheelA.angle;
+    });
+    [m.wheelFL, m.wheelFR].forEach(w => {
+      w.position.set(w === m.wheelFL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, 16, localOffsetFront);
+      w.rotation.x = -car.wheelB.angle;
+    });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Physics world
@@ -316,7 +446,30 @@ let ground = null;
 let player = null;
 let ai = null;
 let raceRunning = false;
-let cameraX = 0;
+const threeGroups = { terrainPlayer: null, terrainAI: null, decor: [] };
+
+function build3DTerrain(laneGround, laneSceneX) {
+  const group = new THREE.Group();
+  for (const b of laneGround.bodies) {
+    const color = TERRAIN_COLOR3D[b.groundType] || 0x666666;
+    const mat = new THREE.MeshStandardMaterial({ color, flatShading: true, roughness: 0.85 });
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(LANE_VISUAL_WIDTH, b._h, b._w), mat);
+    mesh.position.set(laneSceneX, -(b.position.y - laneGround.baseY), -b.position.x);
+    mesh.rotation.x = -b._angle;
+    group.add(mesh);
+  }
+  three.scene.add(group);
+  return group;
+}
+
+function clearGroup(group) {
+  if (!group) return;
+  three.scene.remove(group);
+  group.traverse(obj => {
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.material) obj.material.dispose();
+  });
+}
 
 function initWorld() {
   physics.engine = Engine.create();
@@ -328,11 +481,22 @@ function initWorld() {
   const groundAI = buildGroundBodies(physics.world, track.segments, AI_GROUND_Y, CAT_AI_GROUND);
   ground = { player: groundPlayer, ai: groundAI, bodies: [...groundPlayer.bodies, ...groundAI.bodies] };
 
+  // Clear the previous race's 3D scene objects before building fresh ones
+  clearGroup(threeGroups.terrainPlayer);
+  clearGroup(threeGroups.terrainAI);
+  threeGroups.decor.forEach(m => { three.scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material) m.material.dispose(); });
+  threeGroups.decor = [];
+  if (player && player.mesh3D) clearGroup(player.mesh3D.group);
+  if (ai && ai.mesh3D) clearGroup(ai.mesh3D.group);
+  threeGroups.terrainPlayer = build3DTerrain(groundPlayer, -LANE_X_OFFSET);
+  threeGroups.terrainAI = build3DTerrain(groundAI, LANE_X_OFFSET);
+  addStaticSceneDecor();
+
   const prevPlayerFeatures = player ? player.wheelFeatures : null;
   const prevPlayerPoints = prevPlayerFeatures ? prevPlayerFeatures.rawPoints : null;
 
-  player = createCar(60, PLAYER_COLOR, -1, PLAYER_GROUND_Y, CAT_PLAYER_GROUND);
-  ai = createCar(60, AI_COLOR, -2, AI_GROUND_Y, CAT_AI_GROUND);
+  player = createCar(60, PLAYER_COLOR, -1, PLAYER_GROUND_Y, CAT_PLAYER_GROUND, -LANE_X_OFFSET);
+  ai = createCar(60, AI_COLOR, -2, AI_GROUND_Y, CAT_AI_GROUND, LANE_X_OFFSET);
 
   // Keep whatever wheel the player already drew (e.g. before hitting Start,
   // or from a previous race) instead of resetting to the default circle.
@@ -373,9 +537,20 @@ function onBeforeUpdate() {
     if (car.finished) continue;
     const seg = segmentAt(track.segments, car.chassis.position.x);
     const mul = terrainDriveMultiplier(seg, car.wheelFeatures || {});
-    const speed = BASE_DRIVE_SPEED * mul;
-    Body.setAngularVelocity(car.wheelA, speed);
-    Body.setAngularVelocity(car.wheelB, speed);
+    const targetSpeed = BASE_DRIVE_SPEED * mul;
+
+    // Proportional torque toward a target spin speed, NOT an absolute
+    // override. Forcing angularVelocity directly (the old approach) acts
+    // like an infinite-power motor that ignores whatever resistance the
+    // chassis joint or the terrain is applying — that's what let the wheels
+    // rip away from the chassis. This instead pushes gently toward the
+    // target and lets real friction/collision forces push back, so a wheel
+    // that's genuinely blocked (e.g. wrong shape for these stairs) actually
+    // stays blocked instead of being forced through everything.
+    for (const wheel of [car.wheelA, car.wheelB]) {
+      const err = targetSpeed - wheel.angularVelocity;
+      wheel.torque += err * wheel.inertia * DRIVE_TORQUE_GAIN;
+    }
 
     // sand extra drag
     if (seg && seg.type === 'sand') {
@@ -628,101 +803,74 @@ btnUseWheel.addEventListener('click', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Rendering — diagonal third-person "camera": world-space coordinates are
-// unchanged (2D side-view physics still drives everything), but drawing is
-// passed through a shear + vertical-squash transform so it reads like an
-// angled chase-cam instead of a flat 2D strip. Player and AI each get their
-// own lane (separated in world Y by LANE_GAP), which the shear renders as
-// two parallel diagonal tracks.
+// Rendering — real 3D chase camera. Terrain/car meshes were already built
+// (build3DTerrain / build3DCarMeshes); each frame we just sync mesh
+// transforms from the physics bodies and move the camera to trail the
+// player from behind and slightly above, angled down — a normal third-
+// person racer camera, not a flat 2D view.
 // ---------------------------------------------------------------------------
-function drawLaneGround(laneGround, segments) {
-  const baseY = laneGround.baseY;
-  wctx.fillStyle = 'rgba(61,220,151,0.16)';
-  for (const seg of segments) {
-    if (seg.type === 'water') wctx.fillRect(seg.x0, baseY - 34, seg.len, 34);
-    if (seg.type === 'sand') { wctx.fillStyle = 'rgba(242,193,78,0.10)'; wctx.fillRect(seg.x0, baseY - 6, seg.len, 26); wctx.fillStyle = 'rgba(61,220,151,0.16)'; }
+function addStaticSceneDecor() {
+  // finish line banners for both lanes
+  const bannerMat = new THREE.MeshStandardMaterial({ color: 0xf2c14e, flatShading: true });
+  [{ x: -LANE_X_OFFSET, y: PLAYER_GROUND_Y }, { x: LANE_X_OFFSET, y: AI_GROUND_Y }].forEach(({ x }) => {
+    const post = new THREE.Mesh(new THREE.BoxGeometry(8, 120, 8), bannerMat);
+    post.position.set(x - LANE_VISUAL_WIDTH / 2, 60, -(track.totalLength - 30));
+    three.scene.add(post);
+    threeGroups.decor.push(post);
+    const post2 = post.clone();
+    post2.position.x = x + LANE_VISUAL_WIDTH / 2;
+    three.scene.add(post2);
+    threeGroups.decor.push(post2);
+    const banner = new THREE.Mesh(new THREE.BoxGeometry(LANE_VISUAL_WIDTH + 16, 20, 4), bannerMat);
+    banner.position.set(x, 110, -(track.totalLength - 30));
+    three.scene.add(banner);
+    threeGroups.decor.push(banner);
+  });
+
+  // dashed centre divider between the two lanes, laid flat on the ground
+  const dashMat = new THREE.MeshStandardMaterial({ color: 0xf2c14e, flatShading: true });
+  for (let x = 0; x < track.totalLength; x += 60) {
+    const dash = new THREE.Mesh(new THREE.BoxGeometry(6, 2, 26), dashMat);
+    dash.position.set(0, 1, -x);
+    three.scene.add(dash);
+    threeGroups.decor.push(dash);
   }
-  wctx.fillStyle = '#1b2128';
-  wctx.strokeStyle = '#263140';
-  for (const b of laneGround.bodies) {
-    wctx.beginPath();
-    b.vertices.forEach((v, i) => i === 0 ? wctx.moveTo(v.x, v.y) : wctx.lineTo(v.x, v.y));
-    wctx.closePath(); wctx.fill(); wctx.stroke();
-  }
+
+  // ground-level fill under everything so there's no gap between the two lanes
+  const fillerMat = new THREE.MeshStandardMaterial({ color: 0x22303c, flatShading: true, roughness: 1 });
+  const filler = new THREE.Mesh(new THREE.PlaneGeometry(6000, track.totalLength + 800), fillerMat);
+  filler.rotation.x = -Math.PI / 2;
+  filler.position.set(0, -140, -track.totalLength / 2);
+  three.scene.add(filler);
+  threeGroups.decor.push(filler);
 }
 
-function drawFinishLine(baseY) {
-  const fx = track.totalLength - 30;
-  wctx.fillStyle = '#f2c14e';
-  for (let i = 0; i < 8; i++) wctx.fillRect(fx + (i % 2) * 8, baseY - i * 12 - 8, 8, 8);
-}
+function updateCamera() {
+  const px = player.chassis.position.x;
+  const py = -(player.chassis.position.y - player.groundY);
+  const targetZ = -px;
 
-function drawCar(car) {
-  // soft ground-contact shadow first, so it sits under the wheels
-  wctx.fillStyle = 'rgba(0,0,0,0.35)';
-  for (const wheel of [car.wheelA, car.wheelB]) {
-    if (!wheel) continue;
-    wctx.beginPath();
-    wctx.ellipse(wheel.position.x, car.groundY + 21, car.wheelRadius * 0.9, 6, 0, 0, Math.PI * 2);
-    wctx.fill();
-  }
-  for (const body of [car.wheelA, car.wheelB, car.chassis]) {
-    if (!body) continue;
-    wctx.fillStyle = body.render.fillStyle;
-    wctx.beginPath();
-    body.vertices.forEach((v, i) => i === 0 ? wctx.moveTo(v.x, v.y) : wctx.lineTo(v.x, v.y));
-    wctx.closePath(); wctx.fill();
-  }
+  // trail behind (positive Z relative to travel direction) and above,
+  // looking slightly downward at a point ahead of the car
+  const desired = { x: 0, y: py + 260, z: targetZ + 340 };
+  if (!camState.x) Object.assign(camState, desired);
+  camState.x += (desired.x - camState.x) * 0.08;
+  camState.y += (desired.y - camState.y) * 0.08;
+  camState.z += (desired.z - camState.z) * 0.08;
+
+  three.camera.position.set(camState.x, camState.y, camState.z);
+  three.camera.lookAt(0, py + 20, targetZ - 260);
 }
 
 function renderWorld() {
-  const w = worldCanvas.width, h = worldCanvas.height;
-
-  // Sky, drawn in flat screen space (unaffected by the world camera transform)
-  const sky = wctx.createLinearGradient(0, 0, 0, h);
-  sky.addColorStop(0, '#0b0d10');
-  sky.addColorStop(1, '#14181d');
-  wctx.fillStyle = sky;
-  wctx.fillRect(0, 0, w, h);
-
-  if (!physics.world) return;
-
-  cameraX = player.chassis.position.x - w * 0.28 / VIEW_SQUASH; // pre-squash so the on-screen lead distance stays consistent
-  const midLaneY = (PLAYER_GROUND_Y + AI_GROUND_Y) / 2;
-
-  wctx.save();
-  wctx.translate(w * 0.36, h * 0.5);
-  wctx.transform(1, 0, VIEW_SKEW, VIEW_SQUASH, 0, 0);
-  wctx.translate(-cameraX, -midLaneY);
-
-  drawLaneGround(ground.ai, track.segments);
-  drawLaneGround(ground.player, track.segments);
-
-  // dashed divider between the two tracks
-  wctx.strokeStyle = 'rgba(242,193,78,0.5)';
-  wctx.setLineDash([14, 12]);
-  wctx.lineWidth = 3;
-  wctx.beginPath();
-  wctx.moveTo(0, midLaneY);
-  wctx.lineTo(track.totalLength, midLaneY);
-  wctx.stroke();
-  wctx.setLineDash([]);
-
-  drawFinishLine(PLAYER_GROUND_Y);
-  drawFinishLine(AI_GROUND_Y);
-
-  drawCar(ai);
-  drawCar(player);
-
-  // lane labels, drawn in world space so they scroll with the track
-  wctx.font = '20px "Rajdhani", sans-serif';
-  wctx.fillStyle = 'rgba(232,230,223,0.55)';
-  wctx.fillText('AI', cameraX + 24, AI_GROUND_Y - 90);
-  wctx.fillStyle = 'rgba(242,193,78,0.75)';
-  wctx.fillText('YOU', cameraX + 24, PLAYER_GROUND_Y - 90);
-
-  wctx.restore();
+  if (!physics.world || !three.renderer) return;
+  sync3DCar(player);
+  sync3DCar(ai);
+  updateCamera();
+  three.renderer.render(three.scene, three.camera);
 }
+
+const camState = { x: 0, y: 0, z: 0 };
 
 function updateCameraAndHud() {
   statDist.textContent = Math.max(0, Math.round(player.chassis.position.x)) + 'm';
@@ -774,10 +922,11 @@ function startRace() {
 btnStart.addEventListener('click', startRace);
 btnRestart.addEventListener('click', () => { btnStart.disabled = false; startRace(); });
 
-// Build the world immediately on page load (not just on Start) so the player
-// object exists right away — this is what lets you draw and mount a wheel
-// before the race even begins, instead of erroring out on a null car.
+// Set up the 3D scene first, then build the physics world (which also
+// creates the 3D meshes that live inside that scene) immediately on page
+// load — not just on Start — so the player object exists right away and
+// you can draw/mount a wheel before the race even begins.
+initThreeScene();
 initWorld();
 resizeWorldCanvas();
-renderWorld();
 loop();
