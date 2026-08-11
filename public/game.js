@@ -258,10 +258,16 @@ function mountWheels(car, points, features) {
     Body.setAngularVelocity(w, prevAngularVel);
   });
 
+  // Soft suspension instead of a perfectly rigid pin: a stiffness-1,
+  // zero-length constraint holds the wheel dead-still relative to the
+  // chassis, which is what made the car look welded together with no
+  // give — no bounce over bumps, no gravity feel. A little stiffness/
+  // damping/travel lets the chassis settle onto its wheels and actually
+  // bounce over stairs and rocks, like Matter.js's own car demo does.
   const constraints = offsets.map((off, i) => Constraint.create({
     bodyA: car.chassis, pointA: off,
     bodyB: wheels[i], pointB: { x: 0, y: 0 },
-    stiffness: 1, length: 0
+    stiffness: 0.45, damping: 0.15, length: 4
   }));
 
   World.add(world, [...wheels, ...constraints]);
@@ -548,11 +554,12 @@ let drawing = false;
 function drawStroke() {
   dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
   if (strokePoints.length < 2) return;
+  const ox = drawCanvas.width / 2, oy = drawCanvas.height / 2;
   dctx.strokeStyle = '#3ddc97';
   dctx.lineWidth = 3;
   dctx.beginPath();
-  dctx.moveTo(strokePoints[0].x, strokePoints[0].y);
-  for (const p of strokePoints) dctx.lineTo(p.x, p.y);
+  dctx.moveTo(strokePoints[0].x + ox, strokePoints[0].y + oy);
+  for (const p of strokePoints) dctx.lineTo(p.x + ox, p.y + oy);
   if (strokePoints.length > 3) dctx.closePath();
   dctx.stroke();
 }
