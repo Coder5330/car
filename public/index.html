@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>AI Wheel Racing</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <div id="app">
+
+    <header id="topbar">
+      <div class="brand">
+        <span class="brand-mark">⌁</span>
+        <span class="brand-name">AI WHEEL RACING</span>
+      </div>
+      <div class="run-stats">
+        <div class="stat"><span class="stat-label">DIST</span><span class="stat-val" id="statDist">0m</span></div>
+        <div class="stat"><span class="stat-label">SPEED</span><span class="stat-val" id="statSpeed">0</span></div>
+        <div class="stat"><span class="stat-label">LAST SCORE</span><span class="stat-val" id="statScore">--</span></div>
+      </div>
+      <button id="btnStart" class="btn btn-primary">START RACE</button>
+    </header>
+
+    <main id="stage">
+      <canvas id="world"></canvas>
+
+      <div id="incomingBanner" class="hidden">
+        <div class="incoming-label">TERRAIN AHEAD</div>
+        <div class="incoming-type" id="incomingType">—</div>
+      </div>
+
+      <div id="resultPanel" class="panel hidden">
+        <div class="panel-title">RACE COMPLETE</div>
+        <div id="resultBody"></div>
+        <button id="btnRestart" class="btn btn-primary">RACE AGAIN</button>
+      </div>
+
+    </main>
+
+    <aside id="drawer">
+      <div class="drawer-head">
+        <div class="drawer-title">WHEEL BLUEPRINT</div>
+        <div class="drawer-sub">draw your wheel for the terrain ahead</div>
+      </div>
+
+      <canvas id="drawCanvas" width="280" height="280"></canvas>
+
+      <div class="blueprint-readout" id="blueprintReadout">
+        <div class="bp-row"><span>RADIUS</span><span id="bpRadius">--</span></div>
+        <div class="bp-row"><span>WIDTH RATIO</span><span id="bpWidth">--</span></div>
+        <div class="bp-row"><span>TREAD / TEETH</span><span id="bpTread">--</span></div>
+        <div class="bp-row"><span>IRREGULARITY</span><span id="bpIrreg">--</span></div>
+      </div>
+
+      <div class="drawer-actions">
+        <button id="btnClear" class="btn btn-ghost">CLEAR</button>
+        <button id="btnUseWheel" class="btn btn-accent">MOUNT WHEEL</button>
+      </div>
+
+      <div class="legend">
+        <div class="legend-title">TERRAIN GUIDE</div>
+        <div class="legend-row"><b>Stairs</b> — teeth/cleats climb steps</div>
+        <div class="legend-row"><b>Sand</b> — wide flattened wheels float over it</div>
+        <div class="legend-row"><b>Water</b> — spiky paddle blades push you through</div>
+        <div class="legend-row"><b>Ice</b> — fine tread teeth keep grip</div>
+        <div class="legend-row"><b>Rocks</b> — irregular chunky shapes absorb bumps</div>
+        <div class="legend-row"><b>Slope</b> — bigger radius + teeth for climbing</div>
+      </div>
+
+      <div class="ai-log">
+        <div class="ai-log-title">AI TRAINING LOG</div>
+        <div id="aiLogBody">no data yet — be the first to teach it.</div>
+      </div>
+    </aside>
+
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>

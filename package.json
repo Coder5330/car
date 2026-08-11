@@ -1,0 +1,15 @@
+{
+  "name": "ai-wheel-racing",
+  "version": "1.0.0",
+  "description": "Racing game where you draw wheels; a physics engine scores them and an AI opponent learns from the best ones.",
+  "main": "server.js",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pg": "^8.13.1"
+  }
+}
