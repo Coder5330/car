@@ -20,7 +20,7 @@ const LANE_GAP = 210; // vertical world-space separation between the two lanes
 const AI_GROUND_Y = PLAYER_GROUND_Y + LANE_GAP;
 const SEG_LEN = 900;
 const BUFFER_LEN = 160;
-const BASE_DRIVE_SPEED = 0.85; // wheel angular velocity target — bumped up to compensate for the heavier gravity
+const BASE_DRIVE_SPEED = 1;//0.85; // wheel angular velocity target — bumped up to compensate for the heavier gravity
 const PHYSICS_SUBSTEPS = 4; // see loop() — physics runs in smaller steps to avoid tunneling through thin ground
 // DRIVE_RESPONSE and CHASSIS_ANGULAR_DAMPING below are written as "per
 // animation frame" factors, then converted to a per-substep factor here —
