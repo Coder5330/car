@@ -855,14 +855,27 @@ function addStaticSceneDecor() {
   threeGroups.decor.push(filler);
 }
 
+// Diagonal (three-quarter) chase angle, in degrees, measured off dead-behind.
+// 0 = straight behind (old behavior). Positive swings the camera out to the
+// player's side while it keeps tracking forward motion.
+const CAM_DIAGONAL_DEG = 34;
+const CAM_DIST = 340;   // horizontal distance back from the look target
+const CAM_HEIGHT = 260; // height above the car's own ground line
+
 function updateCamera() {
   const px = player.chassis.position.x;
   const py = -(player.chassis.position.y - player.groundY);
   const targetZ = -px;
 
-  // trail behind (positive Z relative to travel direction) and above,
-  // looking slightly downward at a point ahead of the car
-  const desired = { x: 0, y: py + 260, z: targetZ + 340 };
+  // Same trailing distance as before, but rotated out to the side by
+  // CAM_DIAGONAL_DEG instead of sitting dead-behind on the centerline —
+  // gives a proper angled/three-quarter view instead of a straight rear view.
+  const rad = CAM_DIAGONAL_DEG * Math.PI / 180;
+  const desired = {
+    x: -Math.sin(rad) * CAM_DIST,
+    y: py + CAM_HEIGHT,
+    z: targetZ + Math.cos(rad) * CAM_DIST
+  };
   if (!camState.x) Object.assign(camState, desired);
   camState.x += (desired.x - camState.x) * 0.08;
   camState.y += (desired.y - camState.y) * 0.08;
