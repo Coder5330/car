@@ -20,9 +20,8 @@ const LANE_GAP = 210; // vertical world-space separation between the two lanes
 const AI_GROUND_Y = PLAYER_GROUND_Y + LANE_GAP;
 const SEG_LEN = 900;
 const BUFFER_LEN = 160;
-const BASE_DRIVE_SPEED = 0.45; // wheel angular velocity target
-const DRIVE_TORQUE_GAIN = 0.022; // how hard the wheel motor pushes toward that target (see onBeforeUpdate) — was 0.03, too punchy for the available grip and caused wheelspin
-const MAX_TORQUE_FACTOR = 0.035; // hard cap on torque-per-frame, as a fraction of wheel inertia — was 0.06, which could exceed the friction budget and spin the wheel in place instead of driving the car
+const BASE_DRIVE_SPEED = 0.65; // wheel angular velocity target
+const DRIVE_RESPONSE = 0.16; // how fast the wheel's spin ramps toward that target each frame (see onBeforeUpdate)
 const MIN_WHEEL_R = 15;
 const MAX_WHEEL_R = 34; // was 46 — big enough to matter, not big enough to trivially roll over every stair regardless of shape
 
@@ -312,7 +311,7 @@ function mountWheels(car, points, features) {
 
   const wheels = offsets.map(off => {
     const w = Bodies.fromVertices(cx + off.x, cy + off.y, [vertices], {
-      friction: 1.0, frictionStatic: 1.8, density: 0.0035, restitution: 0,
+      friction: 1.0, frictionStatic: 1.3, density: 0.0035, restitution: 0,
       collisionFilter: filter,
       render: { fillStyle: car.color === PLAYER_COLOR ? '#f2c14e' : '#3ddc97' }
     }, true);
@@ -561,17 +560,19 @@ function onBeforeUpdate() {
     const mul = terrainDriveMultiplier(seg, car.wheelFeatures || {});
     const targetSpeed = BASE_DRIVE_SPEED * mul;
 
-    // Proportional torque toward a target spin speed, clamped so it can
-    // never spike (that spike is what caused the NaN/"glitching" — a huge
-    // torque slammed into a rigidly-pinned wheel on the very first frame
-    // is numerically unstable). The clamp is a hard safety net independent
-    // of the gain constant, so this can't blow up even if the gain is
-    // later tuned too high again.
+    // Drive by directly commanding each wheel's spin speed, ramped smoothly
+    // toward the target instead of fighting it with torque. Torque against a
+    // fully rigid axle constraint has to fight friction to "win" the wheel's
+    // speed indirectly — any mismatch between how hard it pushes and how
+    // much grip is available shows up as slip-stick: the wheel overshoots,
+    // suddenly grips, jerks the chassis forward, and the rigid constraint
+    // snaps it back — that's the forward/backward bouncing. Setting the
+    // angular velocity directly removes that fight: the wheel's spin is
+    // always exactly where we want it, and friction with the ground
+    // converts that spin into forward motion on its own, cleanly.
     for (const wheel of [car.wheelA, car.wheelB]) {
-      const err = targetSpeed - wheel.angularVelocity;
-      const raw = err * wheel.inertia * DRIVE_TORQUE_GAIN;
-      const cap = wheel.inertia * MAX_TORQUE_FACTOR;
-      wheel.torque += Math.max(-cap, Math.min(cap, raw));
+      const newAV = wheel.angularVelocity + (targetSpeed - wheel.angularVelocity) * DRIVE_RESPONSE;
+      Body.setAngularVelocity(wheel, newAV);
     }
 
     // sand extra drag
