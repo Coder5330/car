@@ -315,7 +315,7 @@ function mountWheels(car, points, features) {
 
   const { vertices, radius } = pointsToPhysicsVertices(points, features);
   const cx = car.chassis.position.x, cy = car.chassis.position.y;
-  const offsets = [{ x: -32, y: 16 }, { x: 32, y: 16 }];
+  const offsets = [{ x: -32, y: 28 }, { x: 32, y: 28 }];
   const filter = { group: car.group, mask: car.mask };
 
   const wheels = offsets.map(off => {
@@ -436,11 +436,11 @@ function sync3DCar(car) {
     // of those physics offsets (rear -> +Z, front -> -Z).
     const localOffsetRear = 32, localOffsetFront = -32;
     [m.wheelRL, m.wheelRR].forEach(w => {
-      w.position.set(w === m.wheelRL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, 16, localOffsetRear);
+      w.position.set(w === m.wheelRL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, 28, localOffsetRear);
       w.rotation.x = -car.wheelA.angle;
     });
     [m.wheelFL, m.wheelFR].forEach(w => {
-      w.position.set(w === m.wheelFL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, 16, localOffsetFront);
+      w.position.set(w === m.wheelFL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, 28, localOffsetFront);
       w.rotation.x = -car.wheelB.angle;
     });
   }
