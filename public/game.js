@@ -21,9 +21,10 @@ const AI_GROUND_Y = PLAYER_GROUND_Y + LANE_GAP;
 const SEG_LEN = 900;
 const BUFFER_LEN = 160;
 const BASE_DRIVE_SPEED = 0.45; // wheel angular velocity target
-const DRIVE_TORQUE_GAIN = 0.22; // how hard the wheel motor pushes toward that target (see onBeforeUpdate)
+const DRIVE_TORQUE_GAIN = 0.03; // how hard the wheel motor pushes toward that target (see onBeforeUpdate)
+const MAX_TORQUE_FACTOR = 0.06; // hard cap on torque-per-frame, as a fraction of wheel inertia — prevents blowup regardless of gain
 const MIN_WHEEL_R = 15;
-const MAX_WHEEL_R = 46;
+const MAX_WHEEL_R = 34; // was 46 — big enough to matter, not big enough to trivially roll over every stair regardless of shape
 
 // Two separate physical lanes: the AI's terrain and your terrain never touch
 // or collide with each other — each car only has a collision mask for its
@@ -172,7 +173,7 @@ function buildGroundBodies(world, segments, baseY, category) {
         addBox(cx, baseY + 20, w, 40, 0, 0.8, seg.type);
         break;
       case 'stairs': {
-        const stepW = 60, stepH = 24, steps = Math.floor(w / stepW);
+        const stepW = 60, stepH = 30, steps = Math.floor(w / stepW); // riser raised so max-size smooth wheels can't just roll over it
         for (let i = 0; i < steps; i++) {
           const rise = Math.min(i, 6) * stepH; // cap so it plateaus
           const bx = seg.x0 + i * stepW + stepW / 2;
@@ -474,7 +475,7 @@ function clearGroup(group) {
 function initWorld() {
   physics.engine = Engine.create();
   physics.world = physics.engine.world;
-  physics.world.gravity.y = 1;
+  physics.world.gravity.y = 2.2; // was 1 — too floaty, barely any weight to the car
 
   track = buildTrackPlan();
   const groundPlayer = buildGroundBodies(physics.world, track.segments, PLAYER_GROUND_Y, CAT_PLAYER_GROUND);
@@ -528,6 +529,15 @@ function terrainDriveMultiplier(seg, features) {
     // fine tread teeth restore a bit of grip on top of the low base friction
     return 0.7 + Math.max(0, Math.min(1, features.protrusions / 8)) * 0.5;
   }
+  if (seg.type === 'stairs' || seg.type === 'rocks') {
+    // The step/rock geometry already does most of the work (a smooth
+    // circle genuinely can climb a small enough step in real physics) —
+    // this tops that up so actual tread/teeth give a real, measurable
+    // edge over a plain circle of the same size, instead of size alone
+    // being the whole story.
+    const tread = Math.max(0, Math.min(1, features.protrusions / 6));
+    return 0.55 + tread * 0.7;
+  }
   return 1;
 }
 
@@ -539,17 +549,17 @@ function onBeforeUpdate() {
     const mul = terrainDriveMultiplier(seg, car.wheelFeatures || {});
     const targetSpeed = BASE_DRIVE_SPEED * mul;
 
-    // Proportional torque toward a target spin speed, NOT an absolute
-    // override. Forcing angularVelocity directly (the old approach) acts
-    // like an infinite-power motor that ignores whatever resistance the
-    // chassis joint or the terrain is applying — that's what let the wheels
-    // rip away from the chassis. This instead pushes gently toward the
-    // target and lets real friction/collision forces push back, so a wheel
-    // that's genuinely blocked (e.g. wrong shape for these stairs) actually
-    // stays blocked instead of being forced through everything.
+    // Proportional torque toward a target spin speed, clamped so it can
+    // never spike (that spike is what caused the NaN/"glitching" — a huge
+    // torque slammed into a rigidly-pinned wheel on the very first frame
+    // is numerically unstable). The clamp is a hard safety net independent
+    // of the gain constant, so this can't blow up even if the gain is
+    // later tuned too high again.
     for (const wheel of [car.wheelA, car.wheelB]) {
       const err = targetSpeed - wheel.angularVelocity;
-      wheel.torque += err * wheel.inertia * DRIVE_TORQUE_GAIN;
+      const raw = err * wheel.inertia * DRIVE_TORQUE_GAIN;
+      const cap = wheel.inertia * MAX_TORQUE_FACTOR;
+      wheel.torque += Math.max(-cap, Math.min(cap, raw));
     }
 
     // sand extra drag
