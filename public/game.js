@@ -22,6 +22,7 @@ const SEG_LEN = 900;
 const BUFFER_LEN = 160;
 const BASE_DRIVE_SPEED = 1.3; // wheel angular velocity target — bumped up to compensate for the heavier gravity
 const PHYSICS_SUBSTEPS = 4; // see loop() — physics runs in smaller steps to avoid tunneling through thin ground
+const WHEEL_HEIGHT = 0; // how far the wheel's center sits above the chassis, purely visual
 // DRIVE_RESPONSE and CHASSIS_ANGULAR_DAMPING below are written as "per
 // animation frame" factors, then converted to a per-substep factor here —
 // since onBeforeUpdate actually fires once per physics sub-step (4x per
@@ -315,7 +316,7 @@ function mountWheels(car, points, features) {
 
   const { vertices, radius } = pointsToPhysicsVertices(points, features);
   const cx = car.chassis.position.x, cy = car.chassis.position.y;
-  const offsets = [{ x: -32, y: 28 }, { x: 32, y: 28 }];
+  const offsets = [{ x: -32, y: WHEEL_HEIGHT }, { x: 32, y: WHEEL_HEIGHT }];
   const filter = { group: car.group, mask: car.mask };
 
   const wheels = offsets.map(off => {
@@ -436,11 +437,11 @@ function sync3DCar(car) {
     // of those physics offsets (rear -> +Z, front -> -Z).
     const localOffsetRear = 32, localOffsetFront = -32;
     [m.wheelRL, m.wheelRR].forEach(w => {
-      w.position.set(w === m.wheelRL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, 28, localOffsetRear);
+      w.position.set(w === m.wheelRL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, WHEEL_HEIGHT, localOffsetRear);
       w.rotation.x = -car.wheelA.angle;
     });
     [m.wheelFL, m.wheelFR].forEach(w => {
-      w.position.set(w === m.wheelFL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, 28, localOffsetFront);
+      w.position.set(w === m.wheelFL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, WHEEL_HEIGHT, localOffsetFront);
       w.rotation.x = -car.wheelB.angle;
     });
   }
