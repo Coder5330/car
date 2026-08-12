@@ -22,7 +22,7 @@ const SEG_LEN = 900;
 const BUFFER_LEN = 160;
 const BASE_DRIVE_SPEED = 1.3; // wheel angular velocity target — bumped up to compensate for the heavier gravity
 const PHYSICS_SUBSTEPS = 4; // see loop() — physics runs in smaller steps to avoid tunneling through thin ground
-const WHEEL_HEIGHT = 0; // how far the wheel's center sits above the chassis, purely visual
+const WHEEL_HEIGHT = -16; // how far the wheel's center sits above the chassis, purely visual
 // DRIVE_RESPONSE and CHASSIS_ANGULAR_DAMPING below are written as "per
 // animation frame" factors, then converted to a per-substep factor here —
 // since onBeforeUpdate actually fires once per physics sub-step (4x per
