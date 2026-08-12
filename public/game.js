@@ -31,8 +31,8 @@ const DRIVE_RESPONSE_PER_FRAME = 0.18; // how fast the wheel's spin ramps toward
 const DRIVE_RESPONSE = 1 - Math.pow(1 - DRIVE_RESPONSE_PER_FRAME, 1 / PHYSICS_SUBSTEPS);
 const CHASSIS_ANGULAR_DAMPING_PER_FRAME = 0.9; // fraction of chassis spin kept each animation frame
 const CHASSIS_ANGULAR_DAMPING = Math.pow(CHASSIS_ANGULAR_DAMPING_PER_FRAME, 1 / PHYSICS_SUBSTEPS);
-const MIN_WHEEL_R = 30;
-const MAX_WHEEL_R = 40; // was 46 — big enough to matter, not big enough to trivially roll over every stair regardless of shape
+const MIN_WHEEL_R = 15;
+const MAX_WHEEL_R = 34; // was 46 — big enough to matter, not big enough to trivially roll over every stair regardless of shape
 
 // Two separate physical lanes: the AI's terrain and your terrain never touch
 // or collide with each other — each car only has a collision mask for its
