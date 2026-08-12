@@ -21,8 +21,8 @@ const AI_GROUND_Y = PLAYER_GROUND_Y + LANE_GAP;
 const SEG_LEN = 900;
 const BUFFER_LEN = 160;
 const BASE_DRIVE_SPEED = 0.45; // wheel angular velocity target
-const DRIVE_TORQUE_GAIN = 0.03; // how hard the wheel motor pushes toward that target (see onBeforeUpdate)
-const MAX_TORQUE_FACTOR = 0.06; // hard cap on torque-per-frame, as a fraction of wheel inertia — prevents blowup regardless of gain
+const DRIVE_TORQUE_GAIN = 0.022; // how hard the wheel motor pushes toward that target (see onBeforeUpdate) — was 0.03, too punchy for the available grip and caused wheelspin
+const MAX_TORQUE_FACTOR = 0.035; // hard cap on torque-per-frame, as a fraction of wheel inertia — was 0.06, which could exceed the friction budget and spin the wheel in place instead of driving the car
 const MIN_WHEEL_R = 15;
 const MAX_WHEEL_R = 34; // was 46 — big enough to matter, not big enough to trivially roll over every stair regardless of shape
 
@@ -312,7 +312,7 @@ function mountWheels(car, points, features) {
 
   const wheels = offsets.map(off => {
     const w = Bodies.fromVertices(cx + off.x, cy + off.y, [vertices], {
-      friction: 1.0, frictionStatic: 1.2, density: 0.0035, restitution: 0,
+      friction: 1.0, frictionStatic: 1.8, density: 0.0035, restitution: 0,
       collisionFilter: filter,
       render: { fillStyle: car.color === PLAYER_COLOR ? '#f2c14e' : '#3ddc97' }
     }, true);
@@ -473,7 +473,19 @@ function clearGroup(group) {
 }
 
 function initWorld() {
-  physics.engine = Engine.create();
+  // Higher-than-default solver iterations: with a fully rigid wheel-axle
+  // constraint (stiffness 1) plus driven torque plus the heavier gravity
+  // below, Matter's default iteration counts (6 position / 4 velocity /
+  // 2 constraint) aren't enough to resolve contact + constraint together in
+  // one step. That under-resolution is what shows up as wheels spinning
+  // fast with no forward traction and the chassis bouncing vertically —
+  // the ground contact keeps getting resolved *after* the constraint pulls
+  // the wheel back into the ground, instead of together.
+  physics.engine = Engine.create({
+    positionIterations: 12,
+    velocityIterations: 10,
+    constraintIterations: 4
+  });
   physics.world = physics.engine.world;
   physics.world.gravity.y = 2.2; // was 1 — too floaty, barely any weight to the car
 
