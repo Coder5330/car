@@ -20,7 +20,7 @@ const LANE_GAP = 210; // vertical world-space separation between the two lanes
 const AI_GROUND_Y = PLAYER_GROUND_Y + LANE_GAP;
 const SEG_LEN = 900;
 const BUFFER_LEN = 160;
-const BASE_DRIVE_SPEED = 0.65; // wheel angular velocity target
+const BASE_DRIVE_SPEED = 0.85; // wheel angular velocity target — bumped up to compensate for the heavier gravity
 const PHYSICS_SUBSTEPS = 4; // see loop() — physics runs in smaller steps to avoid tunneling through thin ground
 // DRIVE_RESPONSE and CHASSIS_ANGULAR_DAMPING below are written as "per
 // animation frame" factors, then converted to a per-substep factor here —
@@ -178,7 +178,7 @@ function buildGroundBodies(world, segments, baseY, category) {
     switch (seg.type) {
       case 'flat':
       case 'finish':
-        addBox(cx, baseY + 20, w, 40, 0, 0.8, seg.type);
+        addBox(cx, baseY + 20, w, 40, 0, 0.55, seg.type);
         break;
       case 'stairs': {
         const stepW = 60, stepH = 30, steps = Math.floor(w / stepW); // riser raised so max-size smooth wheels can't just roll over it
@@ -320,7 +320,7 @@ function mountWheels(car, points, features) {
 
   const wheels = offsets.map(off => {
     const w = Bodies.fromVertices(cx + off.x, cy + off.y, [vertices], {
-      friction: 1.0, frictionStatic: 1.3, density: 0.0035, restitution: 0,
+      friction: 0.6, frictionStatic: 0.8, density: 0.0035, restitution: 0,
       collisionFilter: filter,
       render: { fillStyle: car.color === PLAYER_COLOR ? '#f2c14e' : '#3ddc97' }
     }, true);
