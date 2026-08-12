@@ -20,19 +20,28 @@ const LANE_GAP = 210; // vertical world-space separation between the two lanes
 const AI_GROUND_Y = PLAYER_GROUND_Y + LANE_GAP;
 const SEG_LEN = 900;
 const BUFFER_LEN = 160;
-const BASE_DRIVE_SPEED = 1.3; // wheel angular velocity target — bumped up to compensate for the heavier gravity
+const BASE_DRIVE_SPEED = 1.7; // wheel angular velocity target — tuned up from the original 0.85, but kept below the point where wheels lose traction and just spin (that happens around ~2.0 with these friction values)
 const PHYSICS_SUBSTEPS = 4; // see loop() — physics runs in smaller steps to avoid tunneling through thin ground
 // DRIVE_RESPONSE and CHASSIS_ANGULAR_DAMPING below are written as "per
 // animation frame" factors, then converted to a per-substep factor here —
 // since onBeforeUpdate actually fires once per physics sub-step (4x per
 // frame), applying the frame-tuned number directly, 4 times over, would
 // make both far stronger than intended.
-const DRIVE_RESPONSE_PER_FRAME = 0.18; // how fast the wheel's spin ramps toward its target, per animation frame
+const DRIVE_RESPONSE_PER_FRAME = 0.18; // how fast the wheel's spin ramps toward its target, per animation frame — higher than this (tried 0.3) snaps the wheel's angular velocity so hard against the rigid axle constraint that the solver can't keep up, and traction breaks down into pure wheelspin
 const DRIVE_RESPONSE = 1 - Math.pow(1 - DRIVE_RESPONSE_PER_FRAME, 1 / PHYSICS_SUBSTEPS);
 const CHASSIS_ANGULAR_DAMPING_PER_FRAME = 0.9; // fraction of chassis spin kept each animation frame
 const CHASSIS_ANGULAR_DAMPING = Math.pow(CHASSIS_ANGULAR_DAMPING_PER_FRAME, 1 / PHYSICS_SUBSTEPS);
 const MIN_WHEEL_R = 15;
 const MAX_WHEEL_R = 34; // was 46 — big enough to matter, not big enough to trivially roll over every stair regardless of shape
+
+// How far below the chassis center the BOTTOM of the wheel should always
+// sit, regardless of wheel radius. mountWheels() computes each wheel's pin
+// offset as (WHEEL_MOUNT_DROP - radius), so a bigger wheel gets a shorter
+// "axle" and a smaller wheel gets a longer one — the wheel's contact point
+// stays fixed relative to the chassis no matter what size gets drawn.
+// Matches the original spawn geometry (16px offset + ~19px default radius)
+// so the default wheel doesn't shift at all.
+const WHEEL_MOUNT_DROP = 35;
 
 // Two separate physical lanes: the AI's terrain and your terrain never touch
 // or collide with each other — each car only has a collision mask for its
@@ -282,7 +291,14 @@ const PLAYER_COLOR = '#e8e6df';
 const AI_COLOR = '#5a6b7a';
 
 function createCar(startX, color, group, laneGroundY, laneMask, laneSceneX) {
-  const chassis = Bodies.rectangle(startX, laneGroundY - 60, 96, 26, {
+  // Place the chassis so that, once the default wheel is mounted below,
+  // its bottom edge lands right on the ground (tiny 3px gap for a gentle
+  // settle). Because mountWheels() always keeps the wheel's bottom at a
+  // fixed WHEEL_MOUNT_DROP below the chassis center regardless of wheel
+  // radius, this one placement is correct for every wheel size — there's
+  // no more need to re-measure and translate the whole car after the fact.
+  const chassisY = laneGroundY - 3 - WHEEL_MOUNT_DROP;
+  const chassis = Bodies.rectangle(startX, chassisY, 96, 26, {
     density: 0.0022, friction: 0.4, collisionFilter: { group, mask: laneMask },
     render: { fillStyle: color }
   });
@@ -293,15 +309,6 @@ function createCar(startX, color, group, laneGroundY, laneMask, laneSceneX) {
 
   build3DCarMeshes(car);
   mountWheels(car, defaultWheelPoints(), { maxR: 60, widthRatio: 1, irregularity: 0, protrusions: 0, centroid: { x: 0, y: 0 } });
-
-  // Spawn the whole car seated right on the ground (tiny 3px gap for a
-  // gentle settle) instead of floating ~25px above it — that gap was the
-  // "is that meant to be starting?" free-fall at the start of every race.
-  const bottomY = car.wheelA.position.y + car.wheelRadius;
-  const dy = (laneGroundY - 3) - bottomY;
-  Body.translate(car.chassis, { x: 0, y: dy });
-  Body.translate(car.wheelA, { x: 0, y: dy });
-  Body.translate(car.wheelB, { x: 0, y: dy });
   sync3DCar(car);
 
   return car;
@@ -315,7 +322,14 @@ function mountWheels(car, points, features) {
 
   const { vertices, radius } = pointsToPhysicsVertices(points, features);
   const cx = car.chassis.position.x, cy = car.chassis.position.y;
-  const offsets = [{ x: -32, y: 16 }, { x: 32, y: 16 }];
+  // Mount point moves closer to / further from the chassis depending on
+  // wheel radius, so the wheel's BOTTOM edge always sits WHEEL_MOUNT_DROP
+  // below the chassis center no matter what size gets drawn — a smaller
+  // wheel gets a longer "axle" down to the ground, a bigger wheel gets a
+  // shorter one. This is what guarantees the wheel is always touching the
+  // ground instead of floating or clipping when its size changes.
+  const mountY = WHEEL_MOUNT_DROP - radius;
+  const offsets = [{ x: -32, y: mountY }, { x: 32, y: mountY }];
   const filter = { group: car.group, mask: car.mask };
 
   const wheels = offsets.map(off => {
