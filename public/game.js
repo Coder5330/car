@@ -20,7 +20,7 @@ const LANE_GAP = 210; // vertical world-space separation between the two lanes
 const AI_GROUND_Y = PLAYER_GROUND_Y + LANE_GAP;
 const SEG_LEN = 900;
 const BUFFER_LEN = 160;
-const BASE_DRIVE_SPEED = 1.3; // wheel angular velocity target — bumped up to compensate for the heavier gravity
+const BASE_DRIVE_SPEED = 0.85; // wheel angular velocity target — bumped up to compensate for the heavier gravity
 const PHYSICS_SUBSTEPS = 4; // see loop() — physics runs in smaller steps to avoid tunneling through thin ground
 const WHEEL_HEIGHT = 0; // how far the wheel's center sits above the chassis, purely visual
 // DRIVE_RESPONSE and CHASSIS_ANGULAR_DAMPING below are written as "per
@@ -28,7 +28,7 @@ const WHEEL_HEIGHT = 0; // how far the wheel's center sits above the chassis, pu
 // since onBeforeUpdate actually fires once per physics sub-step (4x per
 // frame), applying the frame-tuned number directly, 4 times over, would
 // make both far stronger than intended.
-const DRIVE_RESPONSE_PER_FRAME = 0.18; // how fast the wheel's spin ramps toward its target, per animation frame
+const DRIVE_RESPONSE_PER_FRAME = 0.13; // how fast the wheel's spin ramps toward its target, per animation frame
 const DRIVE_RESPONSE = 1 - Math.pow(1 - DRIVE_RESPONSE_PER_FRAME, 1 / PHYSICS_SUBSTEPS);
 const CHASSIS_ANGULAR_DAMPING_PER_FRAME = 0.9; // fraction of chassis spin kept each animation frame
 const CHASSIS_ANGULAR_DAMPING = Math.pow(CHASSIS_ANGULAR_DAMPING_PER_FRAME, 1 / PHYSICS_SUBSTEPS);
@@ -321,7 +321,7 @@ function mountWheels(car, points, features) {
 
   const wheels = offsets.map(off => {
     const w = Bodies.fromVertices(cx + off.x, cy + off.y, [vertices], {
-      friction: 0.7, frictionStatic: 0.85, density: 0.0035, restitution: 0,
+      friction: 0.6, frictionStatic: 0.7, density: 0.0035, restitution: 0,
       collisionFilter: filter,
       render: { fillStyle: car.color === PLAYER_COLOR ? '#f2c14e' : '#3ddc97' }
     }, true);
