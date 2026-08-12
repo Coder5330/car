@@ -21,7 +21,16 @@ const AI_GROUND_Y = PLAYER_GROUND_Y + LANE_GAP;
 const SEG_LEN = 900;
 const BUFFER_LEN = 160;
 const BASE_DRIVE_SPEED = 0.65; // wheel angular velocity target
-const DRIVE_RESPONSE = 0.16; // how fast the wheel's spin ramps toward that target each frame (see onBeforeUpdate)
+const PHYSICS_SUBSTEPS = 4; // see loop() — physics runs in smaller steps to avoid tunneling through thin ground
+// DRIVE_RESPONSE and CHASSIS_ANGULAR_DAMPING below are written as "per
+// animation frame" factors, then converted to a per-substep factor here —
+// since onBeforeUpdate actually fires once per physics sub-step (4x per
+// frame), applying the frame-tuned number directly, 4 times over, would
+// make both far stronger than intended.
+const DRIVE_RESPONSE_PER_FRAME = 0.16; // how fast the wheel's spin ramps toward its target, per animation frame
+const DRIVE_RESPONSE = 1 - Math.pow(1 - DRIVE_RESPONSE_PER_FRAME, 1 / PHYSICS_SUBSTEPS);
+const CHASSIS_ANGULAR_DAMPING_PER_FRAME = 0.9; // fraction of chassis spin kept each animation frame
+const CHASSIS_ANGULAR_DAMPING = Math.pow(CHASSIS_ANGULAR_DAMPING_PER_FRAME, 1 / PHYSICS_SUBSTEPS);
 const MIN_WHEEL_R = 15;
 const MAX_WHEEL_R = 34; // was 46 — big enough to matter, not big enough to trivially roll over every stair regardless of shape
 
@@ -486,7 +495,7 @@ function initWorld() {
     constraintIterations: 4
   });
   physics.world = physics.engine.world;
-  physics.world.gravity.y = 2.2; // was 1 — too floaty, barely any weight to the car
+  physics.world.gravity.y = 3.4; // was 2.2, still felt floaty
 
   track = buildTrackPlan();
   const groundPlayer = buildGroundBodies(physics.world, track.segments, PLAYER_GROUND_Y, CAT_PLAYER_GROUND);
@@ -574,6 +583,14 @@ function onBeforeUpdate() {
       const newAV = wheel.angularVelocity + (targetSpeed - wheel.angularVelocity) * DRIVE_RESPONSE;
       Body.setAngularVelocity(wheel, newAV);
     }
+
+    // Chassis has nothing else damping its rotation, so any bump (a stair
+    // edge, a wheel suddenly grabbing traction) has nothing to stop it
+    // building into a full flip. Bleeding off a bit of angular velocity
+    // every frame keeps the car pitching from real terrain events without
+    // letting that pitch run away — it doesn't touch position/speed, only
+    // how fast the car is rotating.
+    Body.setAngularVelocity(car.chassis, car.chassis.angularVelocity * CHASSIS_ANGULAR_DAMPING);
 
     // sand extra drag
     if (seg && seg.type === 'sand') {
@@ -936,9 +953,18 @@ function watchAISegment() {
 // Main loop
 // ---------------------------------------------------------------------------
 let raceStartTime = 0;
+// Matter.js has no continuous collision detection, so a body moving far
+// enough in a single step (a wheel with real speed, against ground boxes
+// only ~40px thick) can end its step already past the floor with no
+// overlap ever detected — that's the "glitching through floors". Splitting
+// each frame into several smaller physics steps instead of one big one
+// shrinks how far anything can travel between collision checks, without
+// changing the simulated speed of anything.
 function loop() {
   if (raceRunning) {
-    Engine.update(physics.engine, 1000 / 60);
+    for (let i = 0; i < PHYSICS_SUBSTEPS; i++) {
+      Engine.update(physics.engine, (1000 / 60) / PHYSICS_SUBSTEPS);
+    }
     watchAISegment();
   }
   renderWorld();
