@@ -17,7 +17,7 @@ score comes from measured physics telemetry.
   "sinking into sand" or "paddling through water" isn't something a rigid
   convex hull can do on its own. The force is driven by measurable features
   of your drawing (how wide/flat it is, how many paddle-like protrusions it
-  has) — see `terrainDriveMultiplier` in `public/game.js`.
+  has) — see `terrainDriveMultiplier` in `public/script.js`.
 - **Scoring is server-authoritative.** The client sends raw telemetry
   (distance covered, time, time spent stuck, max tilt, whether it flipped) —
   never a score — and `server.js` recomputes the score itself. See
