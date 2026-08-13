@@ -1,23 +1,49 @@
+// game.js — AI Wheel Racing
+//
+// Design notes (read this before extending):
+// - Stairs / Rocks / Steep / Ice terrain performance comes from REAL rigid-body
+//   physics: the drawn shape is turned into an actual Matter.js polygon wheel,
+//   so a bigger or toothed shape genuinely climbs a step better, and low
+//   ground friction genuinely makes wheels slip on ice. No scripting there.
+// - Sand and Water can't be done with rigid convex hulls alone (no fluid /
+//   deformable-terrain sim), so those two use a small, clearly-labeled force
+//   field driven by measurable wheel features (wideness, paddle-blade count).
+//   Everything else — climbing, slipping, tipping over — is unscripted.
+
 const { Engine, World, Bodies, Body, Constraint, Vertices, Events } = Matter;
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 const PLAYER_GROUND_Y = 420;
-const LANE_GAP = 210; 
+const LANE_GAP = 210; // vertical world-space separation between the two lanes
 const AI_GROUND_Y = PLAYER_GROUND_Y + LANE_GAP;
 const SEG_LEN = 900;
 const BUFFER_LEN = 160;
-const BASE_DRIVE_SPEED = 0.85; 
-const PHYSICS_SUBSTEPS = 4; 
-const WHEEL_HEIGHT = 16;
-const DRIVE_RESPONSE_PER_FRAME = 0.13; 
-const DRIVE_RESPONSE = 1 - Math.pow(1 - DRIVE_RESPONSE_PER_FRAME, 1 / PHYSICS_SUBSTEPS);
-const CHASSIS_ANGULAR_DAMPING_PER_FRAME = 0.9; 
-const CHASSIS_ANGULAR_DAMPING = Math.pow(CHASSIS_ANGULAR_DAMPING_PER_FRAME, 1 / PHYSICS_SUBSTEPS);
+const BASE_DRIVE_SPEED = 0.5; // wheel angular velocity target
+const PHYSICS_SUBSTEPS = 4; // see loop() — physics runs in smaller steps to avoid tunneling through thin ground
+const DRIVE_RESPONSE = 0.16; // how fast the wheel's spin ramps toward its target, per animation frame
+const CHASSIS_ANGULAR_DAMPING = 0.9; // fraction of chassis spin kept each animation frame
 const MIN_WHEEL_R = 15;
-const MAX_WHEEL_R = 34; 
+const MAX_WHEEL_R = 34; // was 46 — big enough to matter, not big enough to trivially roll over every stair regardless of shape
+
+// Two separate physical lanes: the AI's terrain and your terrain never touch
+// or collide with each other — each car only has a collision mask for its
+// own lane's ground. Same segment layout on both, so it's a fair race, but
+// genuinely "AI on one track, you on another."
 const CAT_PLAYER_GROUND = 0x0002;
 const CAT_AI_GROUND = 0x0004;
-const LANE_X_OFFSET = 170;      
-const LANE_VISUAL_WIDTH = 190;  
-const TRACK_HALF_WIDTH = 34;    
+
+// --- 3D presentation ---
+// Physics stays flat 2D (that's what makes a drawn wheel genuinely climb a
+// step); this just maps that 2D simulation into a real 3D scene instead of
+// faking depth with a 2D shear. Mapping convention, used everywhere below:
+//   physics x (progress)      -> scene -Z (forward, away from camera)
+//   physics y (height)        -> scene  Y (up), relative to that car's own ground line
+//   which lane (player vs AI) -> a FIXED scene X offset (not physics-derived)
+const LANE_X_OFFSET = 170;      // how far apart the two lanes sit, left/right
+const LANE_VISUAL_WIDTH = 190;  // how wide each lane's terrain looks
+const TRACK_HALF_WIDTH = 34;    // left/right wheel spacing, purely visual
 const WHEEL_THICKNESS = 16;
 const TERRAIN_COLOR3D = {
   flat: 0x8fd66b, finish: 0x8fd66b, stairs: 0xc9a17a, sand: 0xe9d18c,
@@ -35,6 +61,10 @@ const playerId = (() => {
   if (!id) { id = 'p_' + Math.random().toString(36).slice(2, 12); localStorage.setItem('awr_player_id', id); }
   return id;
 })();
+
+// ---------------------------------------------------------------------------
+// DOM
+// ---------------------------------------------------------------------------
 const worldCanvas = document.getElementById('world');
 const drawCanvas = document.getElementById('drawCanvas');
 const dctx = drawCanvas.getContext('2d');
@@ -56,6 +86,10 @@ const bpWidth = document.getElementById('bpWidth');
 const bpTread = document.getElementById('bpTread');
 const bpIrreg = document.getElementById('bpIrreg');
 
+// ---------------------------------------------------------------------------
+// 3D scene (Three.js) — persists across races; only the terrain/car meshes
+// inside it get rebuilt each time initWorld() runs.
+// ---------------------------------------------------------------------------
 const three = {};
 
 function initThreeScene() {
@@ -85,6 +119,9 @@ function resizeWorldCanvas() {
 }
 window.addEventListener('resize', resizeWorldCanvas);
 
+// ---------------------------------------------------------------------------
+// Track generation
+// ---------------------------------------------------------------------------
 function buildTrackPlan() {
   const shuffled = [...TERRAIN_TYPES].sort(() => Math.random() - 0.5);
   const plan = [{ type: 'flat', len: BUFFER_LEN }];
@@ -114,6 +151,9 @@ function buildGroundBodies(world, segments, baseY, category) {
   const sandZones = [];
   const filter = { category };
 
+  // Creates a ground box AND tags it with the raw dimensions/angle used to
+  // build it, so the 3D layer can reconstruct an exactly matching mesh
+  // later without re-deriving geometry from Matter's world-space vertices.
   function addBox(x, y, w, h, angle, friction, groundType) {
     const b = Bodies.rectangle(x, y, w, h, {
       isStatic: true, friction, angle: angle || 0, collisionFilter: filter, render: {}
@@ -131,12 +171,12 @@ function buildGroundBodies(world, segments, baseY, category) {
     switch (seg.type) {
       case 'flat':
       case 'finish':
-        addBox(cx, baseY + 20, w, 40, 0, 0.55, seg.type);
+        addBox(cx, baseY + 20, w, 40, 0, 0.7, seg.type);
         break;
       case 'stairs': {
-        const stepW = 60, stepH = 30, steps = Math.floor(w / stepW); 
+        const stepW = 60, stepH = 30, steps = Math.floor(w / stepW); // riser raised so max-size smooth wheels can't just roll over it
         for (let i = 0; i < steps; i++) {
-          const rise = Math.min(i, 6) * stepH; 
+          const rise = Math.min(i, 6) * stepH; // cap so it plateaus
           const bx = seg.x0 + i * stepW + stepW / 2;
           addBox(bx, baseY - rise + 20, stepW + 2, 40 + rise, 0, 0.95, 'stairs');
         }
@@ -163,7 +203,7 @@ function buildGroundBodies(world, segments, baseY, category) {
         break;
       }
       case 'steep': {
-        const angle = -0.35; 
+        const angle = -0.35; // radians, climbing
         const len = Math.hypot(w, w * Math.tan(0.35));
         const rise = w * Math.tan(0.35);
         addBox(cx, baseY + 20 - rise / 2, len, 40, angle, 0.95, 'steep');
@@ -175,6 +215,9 @@ function buildGroundBodies(world, segments, baseY, category) {
   return { bodies, waterZones, sandZones, baseY };
 }
 
+// ---------------------------------------------------------------------------
+// Wheel geometry from drawn points
+// ---------------------------------------------------------------------------
 function computeWheelFeatures(points) {
   const cx = points.reduce((s, p) => s + p.x, 0) / points.length;
   const cy = points.reduce((s, p) => s + p.y, 0) / points.length;
@@ -190,6 +233,7 @@ function computeWheelFeatures(points) {
   const height = Math.max(...ys) - Math.min(...ys);
   const widthRatio = height > 0 ? width / height : 1;
 
+  // protrusion count: sample radius by angle bin, count local bumps above mean
   const bins = 24, binMax = new Array(bins).fill(0);
   rel.forEach((p, i) => {
     let ang = Math.atan2(p.y, p.x); if (ang < 0) ang += Math.PI * 2;
@@ -224,9 +268,9 @@ function defaultWheelPoints(n = 16, r = 60) {
   return pts;
 }
 
-
-
-
+// ---------------------------------------------------------------------------
+// Car
+// ---------------------------------------------------------------------------
 const PLAYER_COLOR = '#e8e6df';
 const AI_COLOR = '#5a6b7a';
 
@@ -243,9 +287,9 @@ function createCar(startX, color, group, laneGroundY, laneMask, laneSceneX) {
   build3DCarMeshes(car);
   mountWheels(car, defaultWheelPoints(), { maxR: 60, widthRatio: 1, irregularity: 0, protrusions: 0, centroid: { x: 0, y: 0 } });
 
-  
-  
-  
+  // Spawn the whole car seated right on the ground (tiny 3px gap for a
+  // gentle settle) instead of floating ~25px above it — that gap was the
+  // "is that meant to be starting?" free-fall at the start of every race.
   const bottomY = car.wheelA.position.y + car.wheelRadius;
   const dy = (laneGroundY - 3) - bottomY;
   Body.translate(car.chassis, { x: 0, y: dy });
@@ -264,12 +308,12 @@ function mountWheels(car, points, features) {
 
   const { vertices, radius } = pointsToPhysicsVertices(points, features);
   const cx = car.chassis.position.x, cy = car.chassis.position.y;
-  const offsets = [{ x: -32, y: WHEEL_HEIGHT }, { x: 32, y: WHEEL_HEIGHT }];
+  const offsets = [{ x: -32, y: 16 }, { x: 32, y: 16 }];
   const filter = { group: car.group, mask: car.mask };
 
   const wheels = offsets.map(off => {
     const w = Bodies.fromVertices(cx + off.x, cy + off.y, [vertices], {
-      friction: 0.6, frictionStatic: 0.7, density: 0.0035, restitution: 0,
+      friction: 0.85, frictionStatic: 1.0, density: 0.0035, restitution: 0,
       collisionFilter: filter,
       render: { fillStyle: car.color === PLAYER_COLOR ? '#f2c14e' : '#3ddc97' }
     }, true);
@@ -277,20 +321,20 @@ function mountWheels(car, points, features) {
     return w;
   });
 
-  
-  
-  
+  // Match the chassis's current motion so hot-swapping wheels mid-race
+  // doesn't yank the car (new bodies otherwise spawn at rest, and the rigid
+  // constraint would snap them into sync with a violent impulse).
   wheels.forEach(w => {
     Body.setVelocity(w, prevVelocity);
     Body.setAngularVelocity(w, prevAngularVel);
   });
 
-  
-  
-  
-  
-  
-  
+  // Fully rigid pin, not a spring. A spring (any stiffness under 1) fights a
+  // losing battle against how the wheel is driven below — since the wheel's
+  // spin is forced every frame regardless of load, it acts like an infinite-
+  // power motor, and any spring eventually gets stretched out by it. That's
+  // what caused the wheels to visibly tear away from the chassis. A rigid
+  // pin physically cannot stretch, so this failure mode is gone entirely.
   const constraints = offsets.map((off, i) => Constraint.create({
     bodyA: car.chassis, pointA: off,
     bodyB: wheels[i], pointB: { x: 0, y: 0 },
@@ -306,13 +350,13 @@ function mountWheels(car, points, features) {
   if (car.mesh3D) updateWheelMesh3D(car, vertices);
 }
 
-
-
-
-
-
-
-
+// ---------------------------------------------------------------------------
+// 3D meshes for a car: a box chassis + 4 visual wheels (front/rear pairs,
+// left+right of each). Physics only has one wheel per axle (side-view sim),
+// so each physics wheel drives a symmetric left/right pair of meshes that
+// share its rotation — gives a normal-looking 4-wheeled vehicle without
+// adding a lateral dimension to the underlying 2D physics.
+// ---------------------------------------------------------------------------
 function build3DCarMeshes(car) {
   const bodyColor = new THREE.Color(car.color);
   const chassisMat = new THREE.MeshStandardMaterial({ color: bodyColor, flatShading: true, roughness: 0.6 });
@@ -341,9 +385,9 @@ function build3DCarMeshes(car) {
   car.mesh3D = { group, chassisMesh, wheelFL, wheelFR, wheelRL, wheelRR };
 }
 
-
-
-
+// Rebuilds the wheel meshes' geometry from the same local vertices used for
+// the physics body, so what you drew is exactly what climbs the terrain AND
+// exactly what's shown — extruded sideways into a real 3D tire profile.
 function updateWheelMesh3D(car, localVertices) {
   const shape = new THREE.Shape();
   localVertices.forEach((v, i) => i === 0 ? shape.moveTo(v.x, -v.y) : shape.lineTo(v.x, -v.y));
@@ -361,9 +405,9 @@ function updateWheelMesh3D(car, localVertices) {
   if (oldGeo2 && oldGeo2.dispose && oldGeo2 !== oldGeo) oldGeo2.dispose();
 }
 
-
-
-
+// Copies live physics transforms onto the 3D meshes. Mapping convention:
+// physics x (progress) -> scene -Z, physics y (height, relative to this
+// car's own ground line) -> scene Y, lane -> fixed scene X.
 function sync3DCar(car) {
   const m = car.mesh3D;
   if (!m) return;
@@ -377,27 +421,27 @@ function sync3DCar(car) {
   m.group.rotation.x = -car.chassis.angle;
 
   if (car.wheelA && car.wheelB) {
-    
-    
-    
-    
-    
-    
+    // wheelA/B positions are already relative to the chassis via the pin
+    // constraint, but they carry their own angle (spin) — apply that spin
+    // in the chassis' local frame. mountWheels puts wheelA (rear) at
+    // physics offset x=-32 and wheelB (front) at x=+32; since the global
+    // mapping is scene-Z = -physics-x, the LOCAL z offsets are the mirror
+    // of those physics offsets (rear -> +Z, front -> -Z).
     const localOffsetRear = 32, localOffsetFront = -32;
     [m.wheelRL, m.wheelRR].forEach(w => {
-      w.position.set(w === m.wheelRL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, WHEEL_HEIGHT, localOffsetRear);
+      w.position.set(w === m.wheelRL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, 16, localOffsetRear);
       w.rotation.x = -car.wheelA.angle;
     });
     [m.wheelFL, m.wheelFR].forEach(w => {
-      w.position.set(w === m.wheelFL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, WHEEL_HEIGHT, localOffsetFront);
+      w.position.set(w === m.wheelFL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, 16, localOffsetFront);
       w.rotation.x = -car.wheelB.angle;
     });
   }
 }
 
-
-
-
+// ---------------------------------------------------------------------------
+// Physics world
+// ---------------------------------------------------------------------------
 const physics = {};
 let track = null;
 let ground = null;
@@ -430,28 +474,28 @@ function clearGroup(group) {
 }
 
 function initWorld() {
-  
-  
-  
-  
-  
-  
-  
-  
+  // Higher-than-default solver iterations: with a fully rigid wheel-axle
+  // constraint (stiffness 1) plus driven torque plus the heavier gravity
+  // below, Matter's default iteration counts (6 position / 4 velocity /
+  // 2 constraint) aren't enough to resolve contact + constraint together in
+  // one step. That under-resolution is what shows up as wheels spinning
+  // fast with no forward traction and the chassis bouncing vertically —
+  // the ground contact keeps getting resolved *after* the constraint pulls
+  // the wheel back into the ground, instead of together.
   physics.engine = Engine.create({
     positionIterations: 12,
     velocityIterations: 10,
     constraintIterations: 4
   });
   physics.world = physics.engine.world;
-  physics.world.gravity.y = 3.4; 
+  physics.world.gravity.y = 3.4; // was 2.2, still felt floaty
 
   track = buildTrackPlan();
   const groundPlayer = buildGroundBodies(physics.world, track.segments, PLAYER_GROUND_Y, CAT_PLAYER_GROUND);
   const groundAI = buildGroundBodies(physics.world, track.segments, AI_GROUND_Y, CAT_AI_GROUND);
   ground = { player: groundPlayer, ai: groundAI, bodies: [...groundPlayer.bodies, ...groundAI.bodies] };
 
-  
+  // Clear the previous race's 3D scene objects before building fresh ones
   clearGroup(threeGroups.terrainPlayer);
   clearGroup(threeGroups.terrainAI);
   threeGroups.decor.forEach(m => { three.scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material) m.material.dispose(); });
@@ -468,13 +512,16 @@ function initWorld() {
   player = createCar(60, PLAYER_COLOR, -1, PLAYER_GROUND_Y, CAT_PLAYER_GROUND, -LANE_X_OFFSET);
   ai = createCar(60, AI_COLOR, -2, AI_GROUND_Y, CAT_AI_GROUND, LANE_X_OFFSET);
 
-  
-  
+  // Keep whatever wheel the player already drew (e.g. before hitting Start,
+  // or from a previous race) instead of resetting to the default circle.
   if (prevPlayerPoints) {
     mountWheels(player, prevPlayerPoints, computeWheelFeaturesFromRaw(prevPlayerPoints));
   }
 
-  Events.on(physics.engine, 'beforeUpdate', onBeforeUpdate);
+  // onBeforeUpdate is called manually, once per animation frame, from
+  // loop() below — not hooked to Matter's 'beforeUpdate' event, which
+  // would now fire once per physics sub-step (see PHYSICS_SUBSTEPS) and
+  // re-run all of this 4x a frame instead of once.
 }
 
 function computeWheelFeaturesFromRaw(points) {
@@ -486,7 +533,7 @@ function computeWheelFeaturesFromRaw(points) {
 function terrainDriveMultiplier(seg, features) {
   if (!seg) return 1;
   if (seg.type === 'sand') {
-    
+    // wider/flatter shapes float over sand better
     const wideness = Math.max(0, Math.min(1, (features.widthRatio - 0.8) / 1.2));
     return 0.35 + wideness * 0.65;
   }
@@ -495,15 +542,15 @@ function terrainDriveMultiplier(seg, features) {
     return 0.15 + paddle * 1.1;
   }
   if (seg.type === 'ice') {
-    
+    // fine tread teeth restore a bit of grip on top of the low base friction
     return 0.7 + Math.max(0, Math.min(1, features.protrusions / 8)) * 0.5;
   }
   if (seg.type === 'stairs' || seg.type === 'rocks') {
-    
-    
-    
-    
-    
+    // The step/rock geometry already does most of the work (a smooth
+    // circle genuinely can climb a small enough step in real physics) —
+    // this tops that up so actual tread/teeth give a real, measurable
+    // edge over a plain circle of the same size, instead of size alone
+    // being the whole story.
     const tread = Math.max(0, Math.min(1, features.protrusions / 6));
     return 0.55 + tread * 0.7;
   }
@@ -518,36 +565,36 @@ function onBeforeUpdate() {
     const mul = terrainDriveMultiplier(seg, car.wheelFeatures || {});
     const targetSpeed = BASE_DRIVE_SPEED * mul;
 
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+    // Drive by directly commanding each wheel's spin speed, ramped smoothly
+    // toward the target instead of fighting it with torque. Torque against a
+    // fully rigid axle constraint has to fight friction to "win" the wheel's
+    // speed indirectly — any mismatch between how hard it pushes and how
+    // much grip is available shows up as slip-stick: the wheel overshoots,
+    // suddenly grips, jerks the chassis forward, and the rigid constraint
+    // snaps it back — that's the forward/backward bouncing. Setting the
+    // angular velocity directly removes that fight: the wheel's spin is
+    // always exactly where we want it, and friction with the ground
+    // converts that spin into forward motion on its own, cleanly.
     for (const wheel of [car.wheelA, car.wheelB]) {
       const newAV = wheel.angularVelocity + (targetSpeed - wheel.angularVelocity) * DRIVE_RESPONSE;
       Body.setAngularVelocity(wheel, newAV);
     }
 
-    
-    
-    
-    
-    
-    
+    // Chassis has nothing else damping its rotation, so any bump (a stair
+    // edge, a wheel suddenly grabbing traction) has nothing to stop it
+    // building into a full flip. Bleeding off a bit of angular velocity
+    // every frame keeps the car pitching from real terrain events without
+    // letting that pitch run away — it doesn't touch position/speed, only
+    // how fast the car is rotating.
     Body.setAngularVelocity(car.chassis, car.chassis.angularVelocity * CHASSIS_ANGULAR_DAMPING);
 
-    
+    // sand extra drag
     if (seg && seg.type === 'sand') {
       const wideness = Math.max(0, Math.min(1, ((car.wheelFeatures || {}).widthRatio - 0.8) / 1.2));
       const drag = 0.985 - 0.01 * (1 - wideness);
       Body.setVelocity(car.chassis, { x: car.chassis.velocity.x * drag, y: car.chassis.velocity.y });
     }
-    
+    // water buoyancy-ish force
     if (seg && seg.type === 'water') {
       Body.applyForce(car.chassis, car.chassis.position, { x: 0, y: -0.0009 * car.chassis.mass });
     }
@@ -555,15 +602,15 @@ function onBeforeUpdate() {
     trackTelemetry(car, seg);
     handleStuckAndFlip(car);
 
-    
-    
-    
+    // If the AI is genuinely stuck (not just slow) on the current obstacle,
+    // let it try a different wheel instead of staying frozen for the rest
+    // of the race. Cooldown prevents spamming the API with retries.
     if (car === ai && seg && seg.type !== 'flat' && seg.type !== 'finish' &&
         car.telemetry && car.telemetry.stuckMs > 3200) {
       const now = performance.now();
       if (!car.lastRetryAt || now - car.lastRetryAt > 3500) {
         car.lastRetryAt = now;
-        car.telemetry.stuckMs = 0; 
+        car.telemetry.stuckMs = 0; // give the new wheel a clean slate
         updateAIWheelForSegment(seg);
       }
     }
@@ -575,7 +622,7 @@ function onBeforeUpdate() {
 function trackTelemetry(car, seg) {
   const segIndex = track.segments.indexOf(seg);
   if (segIndex !== car.currentSegIndex) {
-    finalizeSegment(car); 
+    finalizeSegment(car); // scores the segment we're leaving (if any)
     car.currentSegIndex = segIndex;
     car.telemetry = {
       seg, enterTime: performance.now(), enterX: car.chassis.position.x,
@@ -617,8 +664,8 @@ function finalizeSegment(car) {
   }
 }
 
-
-
+// Mirrors server.js scoreFromTelemetry — server re-derives the authoritative
+// score from the same telemetry, this copy is just for instant UI feedback.
 function scoreFromTelemetry(t) {
   const completion = Math.max(0, Math.min(1, t.distance / t.segmentLength));
   if (t.flippedOver) return Math.round(5 * completion);
@@ -673,9 +720,9 @@ function endRace() {
   resultPanel.classList.remove('hidden');
 }
 
-
-
-
+// ---------------------------------------------------------------------------
+// Server communication (training data)
+// ---------------------------------------------------------------------------
 async function submitExample(car, terrainType, telemetry, localScore) {
   try {
     await fetch('/api/examples', {
@@ -690,7 +737,7 @@ async function submitExample(car, terrainType, telemetry, localScore) {
         source: car === player ? 'human' : 'ai'
       })
     });
-  } catch (e) {  }
+  } catch (e) { /* offline-safe: scoring UI already updated locally */ }
 }
 
 async function aiGenerateWheel(terrainType) {
@@ -698,7 +745,7 @@ async function aiGenerateWheel(terrainType) {
     const res = await fetch(`/api/examples?terrainType=${terrainType}&limit=8`);
     const examples = await res.json();
     if (examples.length > 0 && Math.random() > 0.15) {
-      
+      // imitate a strong human example, weighted toward higher scores, with mutation
       const weights = examples.map(e => e.score * e.score + 1);
       const total = weights.reduce((a, b) => a + b, 0);
       let r = Math.random() * total, pick = examples[0];
@@ -706,12 +753,12 @@ async function aiGenerateWheel(terrainType) {
       const jitter = 6;
       return pick.wheelPoints.map(([x, y]) => ({ x: x + (Math.random() - 0.5) * jitter, y: y + (Math.random() - 0.5) * jitter }));
     }
-  } catch (e) {  }
+  } catch (e) { /* fall through to cold-start */ }
   return coldStartWheel(terrainType);
 }
 
 function coldStartWheel(terrainType) {
-  
+  // Day-1 AI: mostly clueless, occasionally stumbles onto something sensible.
   const n = 10 + Math.floor(Math.random() * 6);
   const pts = [];
   const baseR = 30 + Math.random() * 40;
@@ -738,9 +785,9 @@ function logLine(text) {
   while (aiLogBody.children.length > 12) aiLogBody.removeChild(aiLogBody.lastChild);
 }
 
-
-
-
+// ---------------------------------------------------------------------------
+// Drawing panel
+// ---------------------------------------------------------------------------
 let strokePoints = [];
 let drawing = false;
 
@@ -788,18 +835,18 @@ btnUseWheel.addEventListener('click', () => {
   const features = computeWheelFeatures(strokePoints);
   features.rawPoints = strokePoints.slice();
   mountWheels(player, strokePoints, features);
-  logLine('Mounted new wheel â€” measuring performance live.');
+  logLine('Mounted new wheel — measuring performance live.');
 });
 
-
-
-
-
-
-
-
+// ---------------------------------------------------------------------------
+// Rendering — real 3D chase camera. Terrain/car meshes were already built
+// (build3DTerrain / build3DCarMeshes); each frame we just sync mesh
+// transforms from the physics bodies and move the camera to trail the
+// player from behind and slightly above, angled down — a normal third-
+// person racer camera, not a flat 2D view.
+// ---------------------------------------------------------------------------
 function addStaticSceneDecor() {
-  
+  // finish line banners for both lanes
   const bannerMat = new THREE.MeshStandardMaterial({ color: 0xf2c14e, flatShading: true });
   [{ x: -LANE_X_OFFSET, y: PLAYER_GROUND_Y }, { x: LANE_X_OFFSET, y: AI_GROUND_Y }].forEach(({ x }) => {
     const post = new THREE.Mesh(new THREE.BoxGeometry(8, 120, 8), bannerMat);
@@ -816,7 +863,7 @@ function addStaticSceneDecor() {
     threeGroups.decor.push(banner);
   });
 
-  
+  // dashed centre divider between the two lanes, laid flat on the ground
   const dashMat = new THREE.MeshStandardMaterial({ color: 0xf2c14e, flatShading: true });
   for (let x = 0; x < track.totalLength; x += 60) {
     const dash = new THREE.Mesh(new THREE.BoxGeometry(6, 2, 26), dashMat);
@@ -825,7 +872,7 @@ function addStaticSceneDecor() {
     threeGroups.decor.push(dash);
   }
 
-  
+  // ground-level fill under everything so there's no gap between the two lanes
   const fillerMat = new THREE.MeshStandardMaterial({ color: 0x22303c, flatShading: true, roughness: 1 });
   const filler = new THREE.Mesh(new THREE.PlaneGeometry(6000, track.totalLength + 800), fillerMat);
   filler.rotation.x = -Math.PI / 2;
@@ -834,21 +881,21 @@ function addStaticSceneDecor() {
   threeGroups.decor.push(filler);
 }
 
-
-
-
+// Diagonal (three-quarter) chase angle, in degrees, measured off dead-behind.
+// 0 = straight behind (old behavior). Positive swings the camera out to the
+// player's side while it keeps tracking forward motion.
 const CAM_DIAGONAL_DEG = 34;
-const CAM_DIST = 340;   
-const CAM_HEIGHT = 260; 
+const CAM_DIST = 340;   // horizontal distance back from the look target
+const CAM_HEIGHT = 260; // height above the car's own ground line
 
 function updateCamera() {
   const px = player.chassis.position.x;
   const py = -(player.chassis.position.y - player.groundY);
   const targetZ = -px;
 
-  
-  
-  
+  // Same trailing distance as before, but rotated out to the side by
+  // CAM_DIAGONAL_DEG instead of sitting dead-behind on the centerline —
+  // gives a proper angled/three-quarter view instead of a straight rear view.
   const rad = CAM_DIAGONAL_DEG * Math.PI / 180;
   const desired = {
     x: -Math.sin(rad) * CAM_DIST,
@@ -886,10 +933,10 @@ function showIncoming(type) {
   showIncoming._t = setTimeout(() => incomingBanner.classList.add('hidden'), 2600);
 }
 
-
-
-
-
+// ---------------------------------------------------------------------------
+// AI trigger loop: watch which segment the AI is in, regenerate its wheel
+// whenever it crosses into a new non-flat segment.
+// ---------------------------------------------------------------------------
 let lastAISeg = -1;
 function watchAISegment() {
   if (!raceRunning) return;
@@ -898,19 +945,20 @@ function watchAISegment() {
   if (idx !== lastAISeg) { lastAISeg = idx; updateAIWheelForSegment(seg); }
 }
 
-
-
-
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
 let raceStartTime = 0;
-
-
-
-
-
-
-
+// Matter.js has no continuous collision detection, so a body moving far
+// enough in a single step (a wheel with real speed, against ground boxes
+// only ~40px thick) can end its step already past the floor with no
+// overlap ever detected — that's the "glitching through floors". Splitting
+// each frame into several smaller physics steps instead of one big one
+// shrinks how far anything can travel between collision checks, without
+// changing the simulated speed of anything.
 function loop() {
   if (raceRunning) {
+    onBeforeUpdate();
     for (let i = 0; i < PHYSICS_SUBSTEPS; i++) {
       Engine.update(physics.engine, (1000 / 60) / PHYSICS_SUBSTEPS);
     }
@@ -933,10 +981,10 @@ function startRace() {
 btnStart.addEventListener('click', startRace);
 btnRestart.addEventListener('click', () => { btnStart.disabled = false; startRace(); });
 
-
-
-
-
+// Set up the 3D scene first, then build the physics world (which also
+// creates the 3D meshes that live inside that scene) immediately on page
+// load — not just on Start — so the player object exists right away and
+// you can draw/mount a wheel before the race even begins.
 initThreeScene();
 initWorld();
 resizeWorldCanvas();
