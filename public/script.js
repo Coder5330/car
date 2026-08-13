@@ -657,9 +657,15 @@ function onBeforeUpdate() {
         // modest tread — not a glitchy spike shape — still gets over a step
         // with the riser/tread geometry above; protrusions/wideness still
         // give a real, measurable edge on top of that.
-        const baseAssist = 0.002;
+        // This runs once per animation frame, but Engine.update() below
+        // runs PHYSICS_SUBSTEPS times per frame and Matter clears a body's
+        // applied force after each Engine.update() call — so an unscaled
+        // force here is only actually live for 1 of every 4 physics steps,
+        // making it 4x weaker than it looks. Scale by PHYSICS_SUBSTEPS to
+        // compensate, same as it'd be if reapplied every sub-step.
+        const baseAssist = 0.002 * PHYSICS_SUBSTEPS;
         const pushScale = baseAssist * (0.7 + 0.7 * protrusionFactor + 0.5 * widenessFactor);
-        const lift = 0.0006;
+        const lift = 0.0006 * PHYSICS_SUBSTEPS;
         for (const wheel of [car.wheelA, car.wheelB]) {
           if (!wheel) continue;
           // remember original friction so we can restore later
