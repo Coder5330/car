@@ -440,11 +440,11 @@ function sync3DCar(car) {
     // of those physics offsets (rear -> +Z, front -> -Z).
     const localOffsetRear = 32, localOffsetFront = -32;
     [m.wheelRL, m.wheelRR].forEach(w => {
-      w.position.set(w === m.wheelRL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, 16, localOffsetRear);
+      w.position.set(w === m.wheelRL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, -16, localOffsetRear);
       w.rotation.x = -car.wheelA.angle;
     });
     [m.wheelFL, m.wheelFR].forEach(w => {
-      w.position.set(w === m.wheelFL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, 16, localOffsetFront);
+      w.position.set(w === m.wheelFL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, -16, localOffsetFront);
       w.rotation.x = -car.wheelB.angle;
     });
   }
@@ -895,7 +895,7 @@ function addStaticSceneDecor() {
 // Diagonal (three-quarter) chase angle, in degrees, measured off dead-behind.
 // 0 = straight behind (old behavior). Positive swings the camera out to the
 // player's side while it keeps tracking forward motion.
-const CAM_DIAGONAL_DEG = 45;
+const CAM_DIAGONAL_DEG = 52;
 const CAM_DIST = 340;   // horizontal distance back from the look target
 const CAM_HEIGHT = 260; // height above the car's own ground line
 
