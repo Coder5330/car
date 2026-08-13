@@ -895,7 +895,7 @@ function addStaticSceneDecor() {
 // Diagonal (three-quarter) chase angle, in degrees, measured off dead-behind.
 // 0 = straight behind (old behavior). Positive swings the camera out to the
 // player's side while it keeps tracking forward motion.
-const CAM_DIAGONAL_DEG = 34;
+const CAM_DIAGONAL_DEG = 45;
 const CAM_DIST = 340;   // horizontal distance back from the look target
 const CAM_HEIGHT = 260; // height above the car's own ground line
 
