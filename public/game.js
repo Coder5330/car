@@ -375,6 +375,19 @@ function mountWheels(car, points, features) {
   car.wheelRadius = radius;
   car.wheelBottomOffset = bottomOffset;
 
+  // Record when/where this wheel was installed so telemetry scoring can
+  // attribute performance to the active wheel from the moment it was set
+  // until it changes again.
+  try {
+    car.wheelSetAt = performance.now();
+    car.wheelSetX = car.chassis ? car.chassis.position.x : 0;
+    car.wheelSetStuckBaseline = car.telemetry ? car.telemetry.stuckMs || 0 : 0;
+  } catch (e) {
+    car.wheelSetAt = Date.now();
+    car.wheelSetX = car.chassis ? car.chassis.position.x : 0;
+    car.wheelSetStuckBaseline = 0;
+  }
+
   if (car.mesh3D) updateWheelMesh3D(car, vertices);
 }
 
@@ -728,11 +741,18 @@ function trackTelemetry(car, seg) {
 function finalizeSegment(car) {
   const t = car.telemetry;
   if (!t || !t.seg || t.seg.type === 'flat' || t.seg.type === 'finish') { car.telemetry = null; return; }
-  const distance = Math.max(0, car.chassis.position.x - t.enterX);
-  const timeMs = Math.max(1, performance.now() - t.enterTime);
+  // Use wheel-set time/position if the wheel was mounted after entering
+  // the segment — this attributes the measured telemetry to the active
+  // wheel from the moment it was installed until it changed.
+  const startTime = Math.max(t.enterTime || 0, car.wheelSetAt || 0);
+  const startX = Math.max(t.enterX || 0, car.wheelSetX || 0);
+  const distance = Math.max(0, car.chassis.position.x - startX);
+  const timeMs = Math.max(1, performance.now() - startTime);
+  // Adjust stuckMs to subtract any accumulated stuck time prior to wheel set
+  const stuckMs = Math.max(0, (t.stuckMs || 0) - (car.wheelSetStuckBaseline || 0));
   const telemetry = {
     distance, segmentLength: t.seg.len, timeMs,
-    avgSpeed: distance / (timeMs / 1000), stuckMs: t.stuckMs,
+    avgSpeed: distance / (timeMs / 1000), stuckMs,
     maxTiltDeg: t.maxTiltDeg, flippedOver: t.maxTiltDeg > 100
   };
   const score = scoreFromTelemetry(telemetry);
