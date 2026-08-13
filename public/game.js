@@ -256,7 +256,17 @@ function pointsToPhysicsVertices(points, features) {
     x: (p.x - features.centroid.x) * scale,
     y: (p.y - features.centroid.y) * scale
   }));
-  return { vertices: Vertices.hull(verts), radius: targetR };
+  const vertices = Vertices.hull(verts);
+  // "radius" (farthest vertex from center) is only a good stand-in for how
+  // far the wheel reaches DOWNWARD when the shape is roughly circular. A
+  // hand-drawn wheel is usually lopsided — its farthest point might stick
+  // out sideways or upward, not straight down — so using radius to work out
+  // where the ground line should be leaves the actual lowest point of the
+  // shape short of the ground, floating above it. bottomOffset is the real
+  // lowest point of the hull (max local y, since y is down), and is what
+  // ground-placement math should use instead.
+  const bottomOffset = Math.max(...vertices.map(v => v.y));
+  return { vertices, radius: targetR, bottomOffset };
 }
 
 function defaultWheelPoints(n = 16, r = 60) {
@@ -290,7 +300,7 @@ function createCar(startX, color, group, laneGroundY, laneMask, laneSceneX) {
   // Spawn the whole car seated right on the ground (tiny 3px gap for a
   // gentle settle) instead of floating ~25px above it — that gap was the
   // "is that meant to be starting?" free-fall at the start of every race.
-  const bottomY = car.wheelA.position.y + car.wheelRadius;
+  const bottomY = car.wheelA.position.y + car.wheelBottomOffset;
   const dy = (laneGroundY - 3) - bottomY;
   Body.translate(car.chassis, { x: 0, y: dy });
   Body.translate(car.wheelA, { x: 0, y: dy });
@@ -306,7 +316,7 @@ function mountWheels(car, points, features) {
   const prevAngularVel = car.wheelA ? car.wheelA.angularVelocity : 0;
   if (car.wheelA) World.remove(world, [car.wheelA, car.wheelB, car.cA, car.cB]);
 
-  const { vertices, radius } = pointsToPhysicsVertices(points, features);
+  const { vertices, radius, bottomOffset } = pointsToPhysicsVertices(points, features);
   const cx = car.chassis.position.x, cy = car.chassis.position.y;
   const offsets = [{ x: -32, y: 16 }, { x: 32, y: 16 }];
   const filter = { group: car.group, mask: car.mask };
@@ -346,6 +356,7 @@ function mountWheels(car, points, features) {
   car.cA = constraints[0]; car.cB = constraints[1];
   car.wheelFeatures = features;
   car.wheelRadius = radius;
+  car.wheelBottomOffset = bottomOffset;
 
   if (car.mesh3D) updateWheelMesh3D(car, vertices);
 }
