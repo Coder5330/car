@@ -24,8 +24,8 @@ const BASE_DRIVE_SPEED = 0.5; // wheel angular velocity target
 const PHYSICS_SUBSTEPS = 4; // see loop() — physics runs in smaller steps to avoid tunneling through thin ground
 const DRIVE_RESPONSE = 0.16; // how fast the wheel's spin ramps toward its target, per animation frame
 const CHASSIS_ANGULAR_DAMPING = 0.9; // fraction of chassis spin kept each animation frame
-const MIN_WHEEL_R = 15;
-const MAX_WHEEL_R = 34; // was 46 — big enough to matter, not big enough to trivially roll over every stair regardless of shape
+const MIN_WHEEL_R = 22;
+const MAX_WHEEL_R = 42; // was 34 (and 46 before that) — too small to read as actually touching the ground under a 96-long chassis
 
 // Two separate physical lanes: the AI's terrain and your terrain never touch
 // or collide with each other — each car only has a collision mask for its
