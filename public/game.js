@@ -31,8 +31,9 @@ const SEG_LEN = 900;
 const BUFFER_LEN = 160;
 const BASE_DRIVE_SPEED = 0.5; // wheel angular velocity target
 const PHYSICS_SUBSTEPS = 4; // see loop() — physics runs in smaller steps to avoid tunneling through thin ground
-const DRIVE_RESPONSE = 0.16; // how fast the wheel's spin ramps toward its target, per animation frame
-const CHASSIS_ANGULAR_DAMPING = 0.9; // fraction of chassis spin kept each animation frame
+const DRIVE_TORQUE_GAIN = 0.15; // P-gain: how hard the motor pushes per unit of speed error
+const MAX_WHEEL_TORQUE = 0.6; // motor torque cap, so error spikes (e.g. a wheel stopped dead by a stair riser) can't inject unbounded angular impulse
+const CHASSIS_ANGULAR_DAMPING = 0.85; // fraction of chassis spin kept each animation frame — was 0.9, but that wasn't enough to keep the torque-driven chassis from rocking/tipping on stair edges
 const MIN_WHEEL_R = 22;
 const MAX_WHEEL_R = 42; // was 34 (and 46 before that) — too small to read as actually touching the ground under a 96-long chassis
 const REFERENCE_WHEEL_R = (MIN_WHEEL_R + MAX_WHEEL_R) / 2; // see onBeforeUpdate — drive speed is normalized against this
@@ -603,19 +604,26 @@ function onBeforeUpdate() {
     const radiusCorrection = REFERENCE_WHEEL_R / (car.wheelRadius || REFERENCE_WHEEL_R);
     const targetSpeed = BASE_DRIVE_SPEED * mul * radiusCorrection;
 
-    // Drive by directly commanding each wheel's spin speed, ramped smoothly
-    // toward the target instead of fighting it with torque. Torque against a
-    // fully rigid axle constraint has to fight friction to "win" the wheel's
-    // speed indirectly — any mismatch between how hard it pushes and how
-    // much grip is available shows up as slip-stick: the wheel overshoots,
-    // suddenly grips, jerks the chassis forward, and the rigid constraint
-    // snaps it back — that's the forward/backward bouncing. Setting the
-    // angular velocity directly removes that fight: the wheel's spin is
-    // always exactly where we want it, and friction with the ground
-    // converts that spin into forward motion on its own, cleanly.
+    // Drive with a torque-limited motor, not by snapping the wheel's spin to
+    // a target velocity every frame. Body.setAngularVelocity bypasses the
+    // constraint solver entirely — it teleports the wheel's spin to the
+    // target regardless of what the rigid axle pin and ground contact say is
+    // physically consistent that frame. Every frame the wheel's actual speed
+    // disagrees with the target (which is most frames — friction, bumps, a
+    // stair riser blocking the wheel), that forced correction is an
+    // instantaneous, unbounded angular impulse. It has to go somewhere, and
+    // since the axle pin is fully rigid (stiffness 1), it goes straight into
+    // the chassis as rotation — confirmed empirically: with this method the
+    // chassis tumbles continuously (600+ degrees of spin within 5 seconds)
+    // even on flat ground with nothing to hit. A torque-limited motor
+    // instead pushes toward the target speed at a bounded rate, exactly like
+    // a real motor with finite power: friction converts that into forward
+    // motion smoothly, and when a wheel is genuinely blocked (a stair riser)
+    // the capped torque just... pushes as hard as it can, instead of forcing
+    // a discontinuous velocity jump through the chassis.
     for (const wheel of [car.wheelA, car.wheelB]) {
-      const newAV = wheel.angularVelocity + (targetSpeed - wheel.angularVelocity) * DRIVE_RESPONSE;
-      Body.setAngularVelocity(wheel, newAV);
+      const speedError = targetSpeed - wheel.angularVelocity;
+      wheel.torque = Math.max(-MAX_WHEEL_TORQUE, Math.min(MAX_WHEEL_TORQUE, speedError * DRIVE_TORQUE_GAIN));
     }
 
     // Chassis has nothing else damping its rotation, so any bump (a stair
@@ -763,7 +771,7 @@ function endRace() {
 // ---------------------------------------------------------------------------
 async function submitExample(car, terrainType, telemetry, localScore) {
   try {
-    await fetch('/api/examples', {
+    const res = await fetch('/api/examples', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         playerId: car === player ? playerId : 'ai_' + playerId,
@@ -775,7 +783,22 @@ async function submitExample(car, terrainType, telemetry, localScore) {
         source: car === player ? 'human' : 'ai'
       })
     });
-  } catch (e) { /* offline-safe: scoring UI already updated locally */ }
+    // The old version never looked at the response at all — fetch() only
+    // rejects on a network-level failure, NOT on a 4xx/5xx from the server,
+    // so a broken Neon connection (which shows up as a 500 from /api/examples)
+    // was passing through here completely silently every single time.
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.json()).error || ''; } catch (_) { /* body wasn't JSON */ }
+      console.error(`submitExample failed: ${res.status} ${res.statusText}${detail ? ' — ' + detail : ''} (check /api/health for a DB connection issue)`);
+      logLine(`⚠️ save failed (${res.status}) — this play wasn't recorded`);
+    }
+  } catch (e) {
+    // This branch is only a real network/offline failure now, not a masked
+    // server error.
+    console.error('submitExample: network error', e);
+    logLine('⚠️ save failed (offline?) — this play wasn\'t recorded');
+  }
 }
 
 async function aiGenerateWheel(terrainType) {
