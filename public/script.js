@@ -61,7 +61,7 @@ const TERRAIN_COLOR3D = {
   water: 0x5fb3e0, ice: 0xdbeeff, rocks: 0x9a9a95, steep: 0xc9a17a
 };
 
-const TERRAIN_TYPES = ['stairs', 'sand', 'water', 'ice', 'rocks', 'steep'];
+const TERRAIN_TYPES = ['sand', 'water', 'ice', 'rocks', 'steep'];
 const TERRAIN_LABEL = {
   flat: 'OPEN ROAD', stairs: 'STAIRCASE', sand: 'SAND DUNES', water: 'WATER CROSSING',
   ice: 'ICE SHEET', rocks: 'ROCK FIELD', steep: 'STEEP CLIMB', finish: 'FINISH STRETCH'
