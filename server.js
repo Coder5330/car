@@ -20,32 +20,28 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Set it as an environment variable on the Render service.
 // ---------------------------------------------------------------------------
 if (!process.env.DATABASE_URL) {
-  console.warn('WARNING: DATABASE_URL is not set. Set it to your Neon connection string.');
+  console.warn('WARNING: DATABASE_URL is not set. Running in DB-less (local test) mode.');
 }
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // Neon requires SSL; this is the standard Node pg setting for it
-  max: 5,
-  idleTimeoutMillis: 10000, // release idle clients ourselves well before Neon's own autosuspend/pooler can close them out from under us
-  connectionTimeoutMillis: 10000
-});
-
-// `Pool` is an EventEmitter, and pg emits 'error' on it whenever the backend
-// unexpectedly terminates an IDLE client — which is exactly what Neon does
-// on its free/dev tier: the compute autosuspends after inactivity, and its
-// connection pooler recycles idle connections. An unhandled 'error' event on
-// an EventEmitter throws and crashes the entire Node process — not just the
-// one connection. Without this handler, the very first time the app sits
-// idle long enough for Neon to drop the pooled connection, the whole Render
-// service goes down; every /api/examples call fails until Render notices
-// and restarts it. This is almost certainly why saves have been failing
-// intermittently rather than consistently.
-pool.on('error', (err) => {
-  console.error('Postgres pool error (idle client closed, likely by Neon autosuspend/pooler) — pool recovers automatically on next query:', err.message);
-});
+let pool = null;
+if (process.env.DATABASE_URL) {
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }, // Neon requires SSL; this is the standard Node pg setting for it
+    max: 5,
+    idleTimeoutMillis: 10000,
+    connectionTimeoutMillis: 10000
+  });
+  pool.on('error', (err) => {
+    console.error('Postgres pool error (idle client closed, likely by Neon autosuspend/pooler) — pool recovers automatically on next query:', err.message);
+  });
+}
 
 async function initDb() {
+  if (!pool) {
+    console.warn('initDb: no database configured, skipping schema setup.');
+    return;
+  }
   await pool.query(`
     CREATE TABLE IF NOT EXISTS examples (
       id SERIAL PRIMARY KEY,
@@ -122,7 +118,7 @@ app.post('/api/examples', async (req, res) => {
 
     const src = source === 'ai' ? 'ai' : 'human';
 
-    if (src === 'human') {
+    if (src === 'human' && pool) {
       const { rows } = await pool.query(
         `SELECT COUNT(*)::int c FROM examples WHERE player_id = $1 AND terrain_type = $2`,
         [playerId, terrainType]
@@ -138,20 +134,25 @@ app.post('/api/examples', async (req, res) => {
       }
     }
 
-    await pool.query(
-      `INSERT INTO examples (player_id, terrain_type, terrain_features, wheel_points, wheel_features, score, source, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [
-        playerId,
-        terrainType,
-        JSON.stringify(terrainFeatures || []),
-        JSON.stringify(wheelPoints),
-        JSON.stringify(wheelFeatures || []),
-        score,
-        src,
-        Date.now()
-      ]
-    );
+    if (pool) {
+      await pool.query(
+        `INSERT INTO examples (player_id, terrain_type, terrain_features, wheel_points, wheel_features, score, source, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          playerId,
+          terrainType,
+          JSON.stringify(terrainFeatures || []),
+          JSON.stringify(wheelPoints),
+          JSON.stringify(wheelFeatures || []),
+          score,
+          src,
+          Date.now()
+        ]
+      );
+    } else {
+      // No DB configured: accept the example but don't persist it (local dev)
+      console.info('Received example (DB disabled) — score:', score);
+    }
 
     res.json({ score });
   } catch (err) {
@@ -166,6 +167,7 @@ app.get('/api/examples', async (req, res) => {
     const terrainType = String(req.query.terrainType || '');
     const limit = Math.max(1, Math.min(20, parseInt(req.query.limit) || 8));
     if (!terrainType) return res.status(400).json({ error: 'terrainType required' });
+    if (!pool) return res.json([]);
 
     const { rows } = await pool.query(
       `SELECT terrain_features, wheel_points, wheel_features, score, source
@@ -191,6 +193,7 @@ app.get('/api/examples', async (req, res) => {
 
 app.get('/api/stats', async (req, res) => {
   try {
+    if (!pool) return res.json({ total: 0, byTerrain: [] });
     const totalRes = await pool.query(`SELECT COUNT(*)::int c FROM examples`);
     const byTerrainRes = await pool.query(`
       SELECT terrain_type, COUNT(*)::int n, ROUND(AVG(score)::numeric,1) as "avgScore", MAX(score) as "maxScore"
@@ -205,6 +208,7 @@ app.get('/api/stats', async (req, res) => {
 
 app.get('/api/health', async (req, res) => {
   try {
+    if (!pool) return res.json({ ok: true, note: 'no-db' });
     await pool.query('SELECT 1');
     res.json({ ok: true });
   } catch (err) {
