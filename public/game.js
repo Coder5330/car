@@ -618,6 +618,25 @@ function onBeforeUpdate() {
       Body.setAngularVelocity(wheel, newAV);
     }
 
+    // Stair assist: when traversing stairs, apply a small forward/lift
+    // force to help wide/toothed wheels climb stepped geometry instead
+    // of spinning in place. This supplements wheel spin with chassis-level
+    // impulse so the wheel contact can convert rotation into forward
+    // progress more reliably on abrupt steps.
+    if (seg && seg.type === 'stairs') {
+      try {
+        const protrusionFactor = Math.max(0, Math.min(1, ((car.wheelFeatures || {}).protrusions || 0) / 6));
+        const widenessFactor = Math.max(0, Math.min(1, (((car.wheelFeatures || {}).widthRatio || 1) - 0.8) / 1.2));
+        const assistStrength = 0.0009 + 0.0011 * protrusionFactor + 0.0006 * widenessFactor;
+        // push forward a little and give a tiny upward nudge to help climb
+        const push = assistStrength * (targetSpeed >= 0 ? 1 : -1);
+        Body.applyForce(car.chassis, car.chassis.position, { x: push * car.chassis.mass, y: -0.00035 * car.chassis.mass });
+      } catch (e) {
+        // defensive: if body ops fail for any reason, don't crash the loop
+        console.warn('stair assist failed', e);
+      }
+    }
+
     // Chassis has nothing else damping its rotation, so any bump (a stair
     // edge, a wheel suddenly grabbing traction) has nothing to stop it
     // building into a full flip. Damping alone (multiplying by
