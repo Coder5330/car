@@ -25,7 +25,24 @@ if (!process.env.DATABASE_URL) {
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false } // Neon requires SSL; this is the standard Node pg setting for it
+  ssl: { rejectUnauthorized: false }, // Neon requires SSL; this is the standard Node pg setting for it
+  max: 5,
+  idleTimeoutMillis: 10000, // release idle clients ourselves well before Neon's own autosuspend/pooler can close them out from under us
+  connectionTimeoutMillis: 10000
+});
+
+// `Pool` is an EventEmitter, and pg emits 'error' on it whenever the backend
+// unexpectedly terminates an IDLE client — which is exactly what Neon does
+// on its free/dev tier: the compute autosuspends after inactivity, and its
+// connection pooler recycles idle connections. An unhandled 'error' event on
+// an EventEmitter throws and crashes the entire Node process — not just the
+// one connection. Without this handler, the very first time the app sits
+// idle long enough for Neon to drop the pooled connection, the whole Render
+// service goes down; every /api/examples call fails until Render notices
+// and restarts it. This is almost certainly why saves have been failing
+// intermittently rather than consistently.
+pool.on('error', (err) => {
+  console.error('Postgres pool error (idle client closed, likely by Neon autosuspend/pooler) — pool recovers automatically on next query:', err.message);
 });
 
 async function initDb() {
