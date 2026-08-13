@@ -6,7 +6,7 @@ const SEG_LEN = 900;
 const BUFFER_LEN = 160;
 const BASE_DRIVE_SPEED = 0.85; 
 const PHYSICS_SUBSTEPS = 4; 
-const WHEEL_HEIGHT = 0; 
+const WHEEL_HEIGHT = 16;
 const DRIVE_RESPONSE_PER_FRAME = 0.13; 
 const DRIVE_RESPONSE = 1 - Math.pow(1 - DRIVE_RESPONSE_PER_FRAME, 1 / PHYSICS_SUBSTEPS);
 const CHASSIS_ANGULAR_DAMPING_PER_FRAME = 0.9; 
@@ -788,7 +788,7 @@ btnUseWheel.addEventListener('click', () => {
   const features = computeWheelFeatures(strokePoints);
   features.rawPoints = strokePoints.slice();
   mountWheels(player, strokePoints, features);
-  logLine('Mounted new wheel — measuring performance live.');
+  logLine('Mounted new wheel â€” measuring performance live.');
 });
 
 
