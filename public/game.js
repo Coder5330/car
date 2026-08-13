@@ -618,22 +618,39 @@ function onBeforeUpdate() {
       Body.setAngularVelocity(wheel, newAV);
     }
 
-    // Stair assist: when traversing stairs, apply a small forward/lift
-    // force to help wide/toothed wheels climb stepped geometry instead
-    // of spinning in place. This supplements wheel spin with chassis-level
-    // impulse so the wheel contact can convert rotation into forward
-    // progress more reliably on abrupt steps.
+    // Stair assist: when traversing stairs, apply wheel-level forward+up
+    // forces and temporarily boost wheel friction so teeth/wide treads can
+    // convert spin into forward progress instead of slipping. Restore
+    // original friction when leaving stairs.
     if (seg && seg.type === 'stairs') {
       try {
         const protrusionFactor = Math.max(0, Math.min(1, ((car.wheelFeatures || {}).protrusions || 0) / 6));
         const widenessFactor = Math.max(0, Math.min(1, (((car.wheelFeatures || {}).widthRatio || 1) - 0.8) / 1.2));
-        const assistStrength = 0.0009 + 0.0011 * protrusionFactor + 0.0006 * widenessFactor;
-        // push forward a little and give a tiny upward nudge to help climb
-        const push = assistStrength * (targetSpeed >= 0 ? 1 : -1);
-        Body.applyForce(car.chassis, car.chassis.position, { x: push * car.chassis.mass, y: -0.00035 * car.chassis.mass });
+        // Tuned assist scaling: base + contributions from protrusions/wideness
+        const baseAssist = 0.0016;
+        const pushScale = baseAssist * (0.5 + 0.9 * protrusionFactor + 0.6 * widenessFactor);
+        const lift = 0.0005;
+        for (const wheel of [car.wheelA, car.wheelB]) {
+          if (!wheel) continue;
+          // remember original friction so we can restore later
+          if (wheel._origFriction === undefined) wheel._origFriction = wheel.friction || 0.85;
+          const boosted = wheel._origFriction * 1.6;
+          wheel.friction = boosted;
+          // Apply a forward (x) and small upward (y) force at the wheel
+          const forward = pushScale * (targetSpeed >= 0 ? 1 : -1);
+          Body.applyForce(wheel, wheel.position, { x: forward * wheel.mass, y: -lift * wheel.mass });
+        }
       } catch (e) {
-        // defensive: if body ops fail for any reason, don't crash the loop
         console.warn('stair assist failed', e);
+      }
+    } else {
+      // Restore wheel friction when not on stairs
+      for (const wheel of [car.wheelA, car.wheelB]) {
+        if (!wheel) continue;
+        if (wheel._origFriction !== undefined) {
+          wheel.friction = wheel._origFriction;
+          delete wheel._origFriction;
+        }
       }
     }
 
