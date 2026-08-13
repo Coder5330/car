@@ -32,6 +32,7 @@ const BUFFER_LEN = 160;
 const BASE_DRIVE_SPEED = 0.5; // wheel angular velocity target
 const PHYSICS_SUBSTEPS = 4; // see loop() — physics runs in smaller steps to avoid tunneling through thin ground
 const DRIVE_RESPONSE = 0.16; // how fast the wheel's spin ramps toward its target, per animation frame
+const MAX_CHASSIS_ANGULAR_VELOCITY = 0.03; // hard cap on chassis spin rate, per animation frame — see onBeforeUpdate
 const CHASSIS_ANGULAR_DAMPING = 0.9; // fraction of chassis spin kept each animation frame
 const MIN_WHEEL_R = 22;
 const MAX_WHEEL_R = 42; // was 34 (and 46 before that) — too small to read as actually touching the ground under a 96-long chassis
@@ -604,15 +605,14 @@ function onBeforeUpdate() {
     const targetSpeed = BASE_DRIVE_SPEED * mul * radiusCorrection;
 
     // Drive by directly commanding each wheel's spin speed, ramped smoothly
-    // toward the target instead of fighting it with torque. Torque against a
-    // fully rigid axle constraint has to fight friction to "win" the wheel's
-    // speed indirectly — any mismatch between how hard it pushes and how
-    // much grip is available shows up as slip-stick: the wheel overshoots,
-    // suddenly grips, jerks the chassis forward, and the rigid constraint
-    // snaps it back — that's the forward/backward bouncing. Setting the
-    // angular velocity directly removes that fight: the wheel's spin is
-    // always exactly where we want it, and friction with the ground
-    // converts that spin into forward motion on its own, cleanly.
+    // toward the target. (I briefly replaced this with a torque-limited
+    // motor to fix the stair-flipping bug below — that was the right idea
+    // in principle, but the gain/torque values I picked were tuned purely
+    // for "doesn't flip" and killed real driving speed everywhere, then my
+    // attempt to bring speed back reintroduced tipping. Reverted to this,
+    // since it's what actually drove correctly on every terrain except
+    // stairs — the fix for stairs belongs in chassis stability below, not
+    // in how the wheel spin itself is commanded.)
     for (const wheel of [car.wheelA, car.wheelB]) {
       const newAV = wheel.angularVelocity + (targetSpeed - wheel.angularVelocity) * DRIVE_RESPONSE;
       Body.setAngularVelocity(wheel, newAV);
@@ -620,11 +620,18 @@ function onBeforeUpdate() {
 
     // Chassis has nothing else damping its rotation, so any bump (a stair
     // edge, a wheel suddenly grabbing traction) has nothing to stop it
-    // building into a full flip. Bleeding off a bit of angular velocity
-    // every frame keeps the car pitching from real terrain events without
-    // letting that pitch run away — it doesn't touch position/speed, only
-    // how fast the car is rotating.
-    Body.setAngularVelocity(car.chassis, car.chassis.angularVelocity * CHASSIS_ANGULAR_DAMPING);
+    // building into a full flip. Damping alone (multiplying by
+    // CHASSIS_ANGULAR_DAMPING) wasn't enough on its own — a stair riser can
+    // inject enough angular velocity in one substep that even a 10%/frame
+    // decay doesn't catch up before it's already flipped. Clamping the
+    // chassis's angular velocity to a hard cap after damping (confirmed via
+    // simulation: keeps stair-climbing pitch under ~30° and lets it recover
+    // to level, instead of tumbling past 90° and never coming back) stops
+    // that — it doesn't touch position/speed, only how fast the car can
+    // rotate in a single frame.
+    let chassisAV = car.chassis.angularVelocity * CHASSIS_ANGULAR_DAMPING;
+    chassisAV = Math.max(-MAX_CHASSIS_ANGULAR_VELOCITY, Math.min(MAX_CHASSIS_ANGULAR_VELOCITY, chassisAV));
+    Body.setAngularVelocity(car.chassis, chassisAV);
 
     // sand extra drag
     if (seg && seg.type === 'sand') {
@@ -763,7 +770,7 @@ function endRace() {
 // ---------------------------------------------------------------------------
 async function submitExample(car, terrainType, telemetry, localScore) {
   try {
-    await fetch('/api/examples', {
+    const res = await fetch('/api/examples', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         playerId: car === player ? playerId : 'ai_' + playerId,
@@ -775,7 +782,22 @@ async function submitExample(car, terrainType, telemetry, localScore) {
         source: car === player ? 'human' : 'ai'
       })
     });
-  } catch (e) { /* offline-safe: scoring UI already updated locally */ }
+    // The old version never looked at the response at all — fetch() only
+    // rejects on a network-level failure, NOT on a 4xx/5xx from the server,
+    // so a broken Neon connection (which shows up as a 500 from /api/examples)
+    // was passing through here completely silently every single time.
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.json()).error || ''; } catch (_) { /* body wasn't JSON */ }
+      console.error(`submitExample failed: ${res.status} ${res.statusText}${detail ? ' — ' + detail : ''} (check /api/health for a DB connection issue)`);
+      logLine(`⚠️ save failed (${res.status}) — this play wasn't recorded`);
+    }
+  } catch (e) {
+    // This branch is only a real network/offline failure now, not a masked
+    // server error.
+    console.error('submitExample: network error', e);
+    logLine('⚠️ save failed (offline?) — this play wasn\'t recorded');
+  }
 }
 
 async function aiGenerateWheel(terrainType) {
