@@ -156,7 +156,37 @@ function segmentAt(segments, x) {
   return segments[segments.length - 1];
 }
 
-function buildGroundBodies(world, segments, baseY, category) {
+// ---------------------------------------------------------------------------
+// Per-race terrain conditions. Without this, the single best answer to every
+// terrain converges on "draw the biggest smoothest circle you can" — size
+// alone bulldozes stairs/rocks and a plain circle is never actively bad at
+// anything, so shape stops mattering and the AI has nothing left to learn
+// besides "circle, max radius". Rolling fresh conditions each race (same
+// roll for both lanes, so it's still a fair race) means the max-size circle
+// that wins today's staircase can be the wrong answer for today's water
+// viscosity or tomorrow's steeper slope — so drawing FOR the terrain ahead
+// stays the actual skill, and the AI's imitation data has to generalize
+// across conditions instead of memorizing one shape.
+function rollRaceConditions() {
+  const rand = (lo, hi) => lo + Math.random() * (hi - lo);
+  return {
+    stairs: { stepH: rand(16, 34), stepW: rand(55, 90) },
+    sand: { friction: rand(0.9, 1.4), wideBias: rand(0.65, 1.05) },
+    water: { friction: rand(0.15, 0.45), buoyancy: rand(0.0006, 0.0014), densityFactor: rand(0.7, 1.6) },
+    ice: { friction: rand(0.01, 0.05) },
+    rocks: { bumpAmp: rand(10, 24) },
+    steep: { angle: rand(0.22, 0.42) } // radians, climbing
+  };
+}
+
+function describeRaceConditions(c) {
+  const stairPct = Math.round((c.stairs.stepH / 34) * 100);
+  const waterPct = Math.round((c.water.densityFactor / 1.6) * 100);
+  const slopeDeg = Math.round(c.steep.angle * 180 / Math.PI);
+  return `Conditions: stairs ${Math.round(c.stairs.stepH)}px risers (${stairPct}% max) · water viscosity ${waterPct}% · slope ${slopeDeg}°`;
+}
+
+function buildGroundBodies(world, segments, baseY, category, conditions) {
   const bodies = [];
   const waterZones = [];
   const sandZones = [];
@@ -191,9 +221,13 @@ function buildGroundBodies(world, segments, baseY, category) {
         // used like a pogo leg to "glitch" over the steps. A wider tread
         // (stepW) also lowers the step's effective climb angle, which
         // matters more for a rolling wheel than raw riser height does.
-        const stepW = 70, stepH = 20, steps = Math.floor(w / stepW); // riser well under MAX_WHEEL_R so climbing is real, not a glitch
+        // Both rolled per race (see rollRaceConditions) so a max-size wheel
+        // that cruises today's gentle risers can't just coast on size alone
+        // every race.
+        const { stepH, stepW } = conditions.stairs;
+        const steps = Math.floor(w / stepW); // riser well under MAX_WHEEL_R so climbing is real, not a glitch
         for (let i = 0; i < steps; i++) {
-          const rise = Math.min(i, 5) * stepH; // cap so it plateaus at 100 total rise
+          const rise = Math.min(i, 5) * stepH; // cap so it plateaus at 5 steps' worth
           const bx = seg.x0 + i * stepW + stepW / 2;
           // Box is centered at (x, y) with height h, so its top surface sits
           // at y - h/2. We want that top surface at (baseY - rise) so each
@@ -207,29 +241,31 @@ function buildGroundBodies(world, segments, baseY, category) {
         break;
       }
       case 'sand':
-        addBox(cx, baseY + 20, w, 40, 0, 1.1, 'sand');
+        addBox(cx, baseY + 20, w, 40, 0, conditions.sand.friction, 'sand');
         sandZones.push(seg);
         break;
       case 'water':
-        addBox(cx, baseY + 20, w, 40, 0, 0.3, 'water');
+        addBox(cx, baseY + 20, w, 40, 0, conditions.water.friction, 'water');
         waterZones.push(seg);
         break;
       case 'ice':
-        addBox(cx, baseY + 20, w, 40, 0, 0.02, 'ice');
+        addBox(cx, baseY + 20, w, 40, 0, conditions.ice.friction, 'ice');
         break;
       case 'rocks': {
         const chunk = 45, n = Math.floor(w / chunk);
+        const amp = conditions.rocks.bumpAmp;
         for (let i = 0; i < n; i++) {
-          const bump = (Math.sin(i * 1.7) * 0.5 + (Math.random() - 0.5)) * 16;
+          const bump = (Math.sin(i * 1.7) * 0.5 + (Math.random() - 0.5)) * amp;
           const bx = seg.x0 + i * chunk + chunk / 2;
           addBox(bx, baseY + 20 - bump, chunk + 2, 40 + bump, 0, 0.95, 'rocks');
         }
         break;
       }
       case 'steep': {
-        const angle = -0.35; // radians, climbing
-        const len = Math.hypot(w, w * Math.tan(0.35));
-        const rise = w * Math.tan(0.35);
+        const angleAbs = conditions.steep.angle;
+        const angle = -angleAbs; // radians, climbing
+        const len = Math.hypot(w, w * Math.tan(angleAbs));
+        const rise = w * Math.tan(angleAbs);
         addBox(cx, baseY + 20 - rise / 2, len, 40, angle, 0.95, 'steep');
         break;
       }
@@ -498,6 +534,7 @@ function sync3DCar(car) {
 // ---------------------------------------------------------------------------
 const physics = {};
 let track = null;
+let raceConditions = null;
 let ground = null;
 let player = null;
 let ai = null;
@@ -545,8 +582,9 @@ function initWorld() {
   physics.world.gravity.y = 3.4; // was 2.2, still felt floaty
 
   track = buildTrackPlan();
-  const groundPlayer = buildGroundBodies(physics.world, track.segments, PLAYER_GROUND_Y, CAT_PLAYER_GROUND);
-  const groundAI = buildGroundBodies(physics.world, track.segments, AI_GROUND_Y, CAT_AI_GROUND);
+  raceConditions = rollRaceConditions();
+  const groundPlayer = buildGroundBodies(physics.world, track.segments, PLAYER_GROUND_Y, CAT_PLAYER_GROUND, raceConditions);
+  const groundAI = buildGroundBodies(physics.world, track.segments, AI_GROUND_Y, CAT_AI_GROUND, raceConditions);
   ground = { player: groundPlayer, ai: groundAI, bodies: [...groundPlayer.bodies, ...groundAI.bodies] };
 
   // Clear the previous race's 3D scene objects before building fresh ones
@@ -584,15 +622,24 @@ function computeWheelFeaturesFromRaw(points) {
   return f;
 }
 
-function terrainDriveMultiplier(seg, features) {
+function terrainDriveMultiplier(seg, features, conditions) {
   if (!seg) return 1;
   if (seg.type === 'sand') {
-    // wider/flatter shapes float over sand better
-    const wideness = Math.max(0, Math.min(1, (features.widthRatio - 0.8) / 1.2));
+    // wider/flatter shapes float over sand better. wideBias (rolled per
+    // race) shifts how much width is needed before it starts paying off —
+    // a race with loose/deep sand demands a genuinely wide wheel, a race
+    // with firmer sand is more forgiving.
+    const bias = (conditions && conditions.sand) ? conditions.sand.wideBias : 0.8;
+    const wideness = Math.max(0, Math.min(1, (features.widthRatio - bias) / 1.2));
     return 0.35 + wideness * 0.65;
   }
   if (seg.type === 'water') {
-    const paddle = Math.max(0, Math.min(1, features.protrusions / 6));
+    // densityFactor (rolled per race) is how many paddle-blades it takes to
+    // hit full effect — thick/viscous water needs more paddles than thin
+    // water, so a smooth wheel (0 protrusions) never has a "safe" default:
+    // it's always near the 0.15 floor here regardless of size.
+    const densityFactor = (conditions && conditions.water) ? conditions.water.densityFactor : 1;
+    const paddle = Math.max(0, Math.min(1, features.protrusions / (6 * densityFactor)));
     return 0.15 + paddle * 1.1;
   }
   if (seg.type === 'ice') {
@@ -616,7 +663,7 @@ function onBeforeUpdate() {
   for (const car of [player, ai]) {
     if (car.finished) continue;
     const seg = segmentAt(track.segments, car.chassis.position.x);
-    const mul = terrainDriveMultiplier(seg, car.wheelFeatures || {});
+    const mul = terrainDriveMultiplier(seg, car.wheelFeatures || {}, raceConditions);
     // targetSpeed here is angular velocity, and actual ground speed is
     // angularVelocity * radius — so without this correction, a bigger wheel
     // gets more real speed for free on every terrain, before shape or grip
@@ -707,13 +754,15 @@ function onBeforeUpdate() {
 
     // sand extra drag
     if (seg && seg.type === 'sand') {
-      const wideness = Math.max(0, Math.min(1, ((car.wheelFeatures || {}).widthRatio - 0.8) / 1.2));
+      const bias = (raceConditions && raceConditions.sand) ? raceConditions.sand.wideBias : 0.8;
+      const wideness = Math.max(0, Math.min(1, ((car.wheelFeatures || {}).widthRatio - bias) / 1.2));
       const drag = 0.985 - 0.01 * (1 - wideness);
       Body.setVelocity(car.chassis, { x: car.chassis.velocity.x * drag, y: car.chassis.velocity.y });
     }
-    // water buoyancy-ish force
+    // water buoyancy-ish force — strength rolled per race (see raceConditions)
     if (seg && seg.type === 'water') {
-      Body.applyForce(car.chassis, car.chassis.position, { x: 0, y: -0.0009 * car.chassis.mass });
+      const buoyancy = (raceConditions && raceConditions.water) ? raceConditions.water.buoyancy : 0.0009;
+      Body.applyForce(car.chassis, car.chassis.position, { x: 0, y: -buoyancy * car.chassis.mass });
     }
 
     trackTelemetry(car, seg);
@@ -1167,6 +1216,10 @@ function startRace() {
   lastAISeg = -1;
   btnStart.disabled = true;
   logLine('Race started.');
+  // Terrain conditions are randomized per race (see rollRaceConditions) so
+  // there's no single wheel shape that's always right — surface what got
+  // rolled instead of leaving it as hidden RNG.
+  logLine(describeRaceConditions(raceConditions));
 }
 
 btnStart.addEventListener('click', startRace);
