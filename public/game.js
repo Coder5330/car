@@ -12,6 +12,15 @@
 
 const { Engine, World, Bodies, Body, Constraint, Vertices, Events } = Matter;
 
+// Without this, Bodies.fromVertices has no way to handle a concave polygon
+// (spikes, teeth, notches) and silently falls back to Vertices.hull — which
+// is exactly what was smoothing every drawn spike into a convex blob.
+if (typeof decomp !== 'undefined' && Matter.Common && Matter.Common.setDecomp) {
+  Matter.Common.setDecomp(decomp);
+} else {
+  console.warn('poly-decomp not loaded — concave wheel shapes (spikes/teeth) will be flattened to their convex hull.');
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -256,7 +265,13 @@ function pointsToPhysicsVertices(points, features) {
     x: (p.x - features.centroid.x) * scale,
     y: (p.y - features.centroid.y) * scale
   }));
-  const vertices = Vertices.hull(verts);
+  // Keep the actual drawn outline (spikes, teeth, notches and all) instead
+  // of forcing it through Vertices.hull, which discards any concave detail
+  // and is exactly what was turning spikes into a smooth convex blob.
+  // Bodies.fromVertices (in mountWheels) will decompose this into convex
+  // parts using poly-decomp — the shape only falls back to its convex hull
+  // if that decomposition genuinely fails (self-intersecting drawing etc).
+  const vertices = Vertices.clockwiseSort(verts);
   // "radius" (farthest vertex from center) is only a good stand-in for how
   // far the wheel reaches DOWNWARD when the shape is roughly circular. A
   // hand-drawn wheel is usually lopsided — its farthest point might stick
