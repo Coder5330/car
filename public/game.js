@@ -770,13 +770,53 @@ function endRace() {
 // ---------------------------------------------------------------------------
 async function submitExample(car, terrainType, telemetry, localScore) {
   try {
+    // Ensure we never send more than the server's 60-point limit by
+    // resampling the drawn outline by arc-length (preserves shape).
+    function resampleClosedPolyline(points, maxPts = 60) {
+      if (!points || points.length === 0) return [];
+      if (points.length <= maxPts) return points.slice();
+      // Build a closed loop for sampling
+      const closed = points.slice();
+      const first = closed[0], last = closed[closed.length - 1];
+      if (first.x !== last.x || first.y !== last.y) closed.push({ x: first.x, y: first.y });
+
+      const segLens = new Array(closed.length - 1);
+      let total = 0;
+      for (let i = 0; i < closed.length - 1; i++) {
+        const dx = closed[i + 1].x - closed[i].x;
+        const dy = closed[i + 1].y - closed[i].y;
+        const l = Math.hypot(dx, dy);
+        segLens[i] = l;
+        total += l;
+      }
+      if (total === 0) return [ { x: closed[0].x, y: closed[0].y } ];
+
+      const step = total / maxPts;
+      const out = [];
+      let segIdx = 0, segAccum = 0;
+      for (let i = 0; i < maxPts; i++) {
+        const target = i * step;
+        while (segIdx < segLens.length - 1 && segAccum + segLens[segIdx] < target) {
+          segAccum += segLens[segIdx];
+          segIdx++;
+        }
+        const a = closed[segIdx], b = closed[segIdx + 1];
+        const along = Math.max(0, Math.min(1, (target - segAccum) / (segLens[segIdx] || 1)));
+        out.push({ x: a.x + (b.x - a.x) * along, y: a.y + (b.y - a.y) * along });
+      }
+      return out;
+    }
+
+    const raw = (car.wheelFeatures && car.wheelFeatures.rawPoints) || defaultWheelPoints();
+    const toSend = resampleClosedPolyline(raw, 60);
+
     const res = await fetch('/api/examples', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         playerId: car === player ? playerId : 'ai_' + playerId,
         terrainType,
         terrainFeatures: [],
-        wheelPoints: (car.wheelFeatures.rawPoints || defaultWheelPoints()).map(p => [p.x, p.y]),
+        wheelPoints: toSend.map(p => [p.x, p.y]),
         wheelFeatures: [car.wheelFeatures.maxR, car.wheelFeatures.widthRatio, car.wheelFeatures.protrusions, car.wheelFeatures.irregularity],
         telemetry,
         source: car === player ? 'human' : 'ai'
