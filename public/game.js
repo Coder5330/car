@@ -781,18 +781,29 @@ async function submitExample(car, terrainType, telemetry, localScore) {
 async function aiGenerateWheel(terrainType) {
   try {
     const res = await fetch(`/api/examples?terrainType=${terrainType}&limit=8`);
-    const examples = await res.json();
-    if (examples.length > 0 && Math.random() > 0.15) {
-      // imitate a strong human example, weighted toward higher scores, with mutation
-      const weights = examples.map(e => e.score * e.score + 1);
-      const total = weights.reduce((a, b) => a + b, 0);
-      let r = Math.random() * total, pick = examples[0];
-      for (let i = 0; i < examples.length; i++) { r -= weights[i]; if (r <= 0) { pick = examples[i]; break; } }
-      const jitter = 6;
-      return pick.wheelPoints.map(([x, y]) => ({ x: x + (Math.random() - 0.5) * jitter, y: y + (Math.random() - 0.5) * jitter }));
+    if (!res.ok) {
+      console.warn(`AI: /api/examples returned ${res.status} for ${terrainType} — check /api/health (likely a DB connection issue).`);
+      return { points: coldStartWheel(terrainType), reason: `server error (${res.status}) — cold-start` };
     }
-  } catch (e) { /* fall through to cold-start */ }
-  return coldStartWheel(terrainType);
+    const examples = await res.json();
+    if (examples.length === 0) {
+      return { points: coldStartWheel(terrainType), reason: 'no human data yet — cold-start' };
+    }
+    if (Math.random() <= 0.15) {
+      return { points: coldStartWheel(terrainType), reason: `cold-start (random roll, ${examples.length} examples available)` };
+    }
+    // imitate a strong human example, weighted toward higher scores, with mutation
+    const weights = examples.map(e => e.score * e.score + 1);
+    const total = weights.reduce((a, b) => a + b, 0);
+    let r = Math.random() * total, pick = examples[0];
+    for (let i = 0; i < examples.length; i++) { r -= weights[i]; if (r <= 0) { pick = examples[i]; break; } }
+    const jitter = 6;
+    const points = pick.wheelPoints.map(([x, y]) => ({ x: x + (Math.random() - 0.5) * jitter, y: y + (Math.random() - 0.5) * jitter }));
+    return { points, reason: `imitating score-${pick.score} human wheel (${examples.length} available)` };
+  } catch (e) {
+    console.warn('AI: /api/examples fetch failed — check network/console (falling back to cold-start):', e);
+    return { points: coldStartWheel(terrainType), reason: 'fetch failed — cold-start' };
+  }
 }
 
 function coldStartWheel(terrainType) {
@@ -810,7 +821,8 @@ function coldStartWheel(terrainType) {
 
 async function updateAIWheelForSegment(seg) {
   if (!seg || seg.type === 'flat' || seg.type === 'finish') return;
-  const points = await aiGenerateWheel(seg.type);
+  const { points, reason } = await aiGenerateWheel(seg.type);
+  logLine(`${seg.type.toUpperCase()}: ${reason}`);
   const features = computeWheelFeatures(points);
   features.rawPoints = points;
   mountWheels(ai, points, features);
