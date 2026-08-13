@@ -35,6 +35,7 @@ const DRIVE_RESPONSE = 0.16; // how fast the wheel's spin ramps toward its targe
 const CHASSIS_ANGULAR_DAMPING = 0.9; // fraction of chassis spin kept each animation frame
 const MIN_WHEEL_R = 22;
 const MAX_WHEEL_R = 42; // was 34 (and 46 before that) — too small to read as actually touching the ground under a 96-long chassis
+const REFERENCE_WHEEL_R = (MIN_WHEEL_R + MAX_WHEEL_R) / 2; // see onBeforeUpdate — drive speed is normalized against this
 
 // Two separate physical lanes: the AI's terrain and your terrain never touch
 // or collide with each other — each car only has a collision mask for its
@@ -589,7 +590,18 @@ function onBeforeUpdate() {
     if (car.finished) continue;
     const seg = segmentAt(track.segments, car.chassis.position.x);
     const mul = terrainDriveMultiplier(seg, car.wheelFeatures || {});
-    const targetSpeed = BASE_DRIVE_SPEED * mul;
+    // targetSpeed here is angular velocity, and actual ground speed is
+    // angularVelocity * radius — so without this correction, a bigger wheel
+    // gets more real speed for free on every terrain, before shape or grip
+    // even come into it. That's what was making large wheels win regardless
+    // of terrain, which defeats the "draw the right shape" premise of the
+    // game. Scaling by REFERENCE_WHEEL_R / actual radius holds ground speed
+    // roughly constant across wheel sizes by default — a bigger wheel's real
+    // advantage (rolling over a step more easily, per the terrain legend)
+    // still comes through on its own from the rigid-body geometry, it's just
+    // no longer stacked with a free speed bonus everywhere else too.
+    const radiusCorrection = REFERENCE_WHEEL_R / (car.wheelRadius || REFERENCE_WHEEL_R);
+    const targetSpeed = BASE_DRIVE_SPEED * mul * radiusCorrection;
 
     // Drive by directly commanding each wheel's spin speed, ramped smoothly
     // toward the target instead of fighting it with torque. Torque against a
@@ -910,7 +922,7 @@ function addStaticSceneDecor() {
 // Diagonal (three-quarter) chase angle, in degrees, measured off dead-behind.
 // 0 = straight behind (old behavior). Positive swings the camera out to the
 // player's side while it keeps tracking forward motion.
-const CAM_DIAGONAL_DEG = 52;
+const CAM_DIAGONAL_DEG = 55;
 const CAM_DIST = 340;   // horizontal distance back from the look target
 const CAM_HEIGHT = 260; // height above the car's own ground line
 
