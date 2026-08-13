@@ -61,7 +61,7 @@ const TERRAIN_COLOR3D = {
   water: 0x5fb3e0, ice: 0xdbeeff, rocks: 0x9a9a95, steep: 0xc9a17a
 };
 
-const TERRAIN_TYPES = ['sand', 'water', 'ice', 'rocks', 'steep'];
+const TERRAIN_TYPES = ['stairs', 'sand', 'water', 'ice', 'rocks', 'steep'];
 const TERRAIN_LABEL = {
   flat: 'OPEN ROAD', stairs: 'STAIRCASE', sand: 'SAND DUNES', water: 'WATER CROSSING',
   ice: 'ICE SHEET', rocks: 'ROCK FIELD', steep: 'STEEP CLIMB', finish: 'FINISH STRETCH'
@@ -185,17 +185,23 @@ function buildGroundBodies(world, segments, baseY, category) {
         addBox(cx, baseY + 20, w, 40, 0, 0.7, seg.type);
         break;
       case 'stairs': {
-        const stepW = 60, stepH = 30, steps = Math.floor(w / stepW); // riser raised so max-size smooth wheels can't just roll over it
+        // Riser height needs real headroom under MAX_WHEEL_R (42) so a
+        // normal, roundish, treaded wheel can climb it through actual
+        // rolling contact — not just a wheel drawn as a single long spike
+        // used like a pogo leg to "glitch" over the steps. A wider tread
+        // (stepW) also lowers the step's effective climb angle, which
+        // matters more for a rolling wheel than raw riser height does.
+        const stepW = 70, stepH = 20, steps = Math.floor(w / stepW); // riser well under MAX_WHEEL_R so climbing is real, not a glitch
         for (let i = 0; i < steps; i++) {
-          const rise = Math.min(i, 6) * stepH; // cap so it plateaus
+          const rise = Math.min(i, 5) * stepH; // cap so it plateaus at 100 total rise
           const bx = seg.x0 + i * stepW + stepW / 2;
           // Box is centered at (x, y) with height h, so its top surface sits
           // at y - h/2. We want that top surface at (baseY - rise) so each
           // step's riser is exactly stepH tall. With h = 40 + rise, that
           // means y = (baseY - rise) + h/2 = baseY - rise/2 + 20 — NOT
           // baseY - rise + 20, which was putting the top surface at
-          // baseY - 1.5*rise (a 45-unit riser instead of the intended 30,
-          // taller than any wheel's max radius and impossible to climb).
+          // baseY - 1.5*rise (a taller riser than intended and impossible
+          // to climb).
           addBox(bx, baseY - rise / 2 + 20, stepW + 2, 40 + rise, 0, 0.95, 'stairs');
         }
         break;
@@ -646,15 +652,19 @@ function onBeforeUpdate() {
       try {
         const protrusionFactor = Math.max(0, Math.min(1, ((car.wheelFeatures || {}).protrusions || 0) / 6));
         const widenessFactor = Math.max(0, Math.min(1, (((car.wheelFeatures || {}).widthRatio || 1) - 0.8) / 1.2));
-        // Tuned assist scaling: base + contributions from protrusions/wideness
-        const baseAssist = 0.0016;
-        const pushScale = baseAssist * (0.5 + 0.9 * protrusionFactor + 0.6 * widenessFactor);
-        const lift = 0.0005;
+        // Tuned assist scaling: base + contributions from protrusions/wideness.
+        // Floor raised from 0.5 to 0.7 so a plain roundish wheel with only
+        // modest tread — not a glitchy spike shape — still gets over a step
+        // with the riser/tread geometry above; protrusions/wideness still
+        // give a real, measurable edge on top of that.
+        const baseAssist = 0.002;
+        const pushScale = baseAssist * (0.7 + 0.7 * protrusionFactor + 0.5 * widenessFactor);
+        const lift = 0.0006;
         for (const wheel of [car.wheelA, car.wheelB]) {
           if (!wheel) continue;
           // remember original friction so we can restore later
           if (wheel._origFriction === undefined) wheel._origFriction = wheel.friction || 0.85;
-          const boosted = wheel._origFriction * 1.6;
+          const boosted = wheel._origFriction * 1.8;
           wheel.friction = boosted;
           // Apply a forward (x) and small upward (y) force at the wheel
           const forward = pushScale * (targetSpeed >= 0 ? 1 : -1);
