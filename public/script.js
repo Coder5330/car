@@ -1,4 +1,4 @@
-// game.js — AI Wheel Racing
+// script.js — AI Wheel Racing
 //
 // Design notes (read this before extending):
 // - Stairs / Rocks / Steep / Ice terrain performance comes from REAL rigid-body
@@ -189,7 +189,14 @@ function buildGroundBodies(world, segments, baseY, category) {
         for (let i = 0; i < steps; i++) {
           const rise = Math.min(i, 6) * stepH; // cap so it plateaus
           const bx = seg.x0 + i * stepW + stepW / 2;
-          addBox(bx, baseY - rise + 20, stepW + 2, 40 + rise, 0, 0.95, 'stairs');
+          // Box is centered at (x, y) with height h, so its top surface sits
+          // at y - h/2. We want that top surface at (baseY - rise) so each
+          // step's riser is exactly stepH tall. With h = 40 + rise, that
+          // means y = (baseY - rise) + h/2 = baseY - rise/2 + 20 — NOT
+          // baseY - rise + 20, which was putting the top surface at
+          // baseY - 1.5*rise (a 45-unit riser instead of the intended 30,
+          // taller than any wheel's max radius and impossible to climb).
+          addBox(bx, baseY - rise / 2 + 20, stepW + 2, 40 + rise, 0, 0.95, 'stairs');
         }
         break;
       }
