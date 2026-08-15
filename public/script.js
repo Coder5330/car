@@ -29,14 +29,16 @@ const LANE_GAP = 210; // vertical world-space separation between the two lanes
 const AI_GROUND_Y = PLAYER_GROUND_Y + LANE_GAP;
 const SEG_LEN = 900;
 const BUFFER_LEN = 160;
-const BASE_DRIVE_SPEED = 0.5; // wheel angular velocity target
+const BASE_DRIVE_SPEED = 2.2; // wheel angular velocity target — was 0.5, then 0.85; still felt way too slow overall (segments were taking minutes to cross instead of single-digit seconds)
 const PHYSICS_SUBSTEPS = 4; // see loop() — physics runs in smaller steps to avoid tunneling through thin ground
-const DRIVE_RESPONSE = 0.16; // how fast the wheel's spin ramps toward its target, per animation frame
+const DRIVE_RESPONSE = 0.22; // how fast the wheel's spin ramps toward its target, per animation frame — was 0.16, snappier now that BASE_DRIVE_SPEED is much higher
 const MAX_CHASSIS_ANGULAR_VELOCITY = 0.03; // hard cap on chassis spin rate, per animation frame — see onBeforeUpdate
 const CHASSIS_ANGULAR_DAMPING = 0.9; // fraction of chassis spin kept each animation frame
 const MIN_WHEEL_R = 22;
 const MAX_WHEEL_R = 42; // was 34 (and 46 before that) — too small to read as actually touching the ground under a 96-long chassis
 const REFERENCE_WHEEL_R = (MIN_WHEEL_R + MAX_WHEEL_R) / 2; // see onBeforeUpdate — drive speed is normalized against this
+const WATER_PIT_DEPTH = 130; // how far below the normal ground line water's actual collision floor sits — see buildGroundBodies 'water' case
+const RACE_START_X = 60; // matches createCar's startX — where a flipped car gets sent back to
 
 // Two separate physical lanes: the AI's terrain and your terrain never touch
 // or collide with each other — each car only has a collision mask for its
@@ -214,7 +216,7 @@ function createAmbientSandPool(count) {
   // bright sand/dunes of a similar color; contrast matters more than raw
   // particle size for these actually being visible.
   const mat = new THREE.PointsMaterial({
-    color: 0xfff8e0, size: 5, sizeAttenuation: false,
+    color: 0xfff8e0, size: 30, sizeAttenuation: false,
     transparent: true, opacity: 0.85, depthWrite: false
   });
   const points = new THREE.Points(geo, mat);
@@ -369,7 +371,7 @@ function buildGroundBodies(world, segments, baseY, category, conditions) {
     switch (seg.type) {
       case 'flat':
       case 'finish':
-        addBox(cx, baseY + 20, w, 40, 0, 0.7, seg.type);
+        addBox(cx, baseY + 20, w, 40, 0, 1.0, seg.type); // was 0.7 — paired with the wheel friction increase (see mountWheels) to fix a real traction bottleneck
         break;
       case 'stairs': {
         // Riser height needs real headroom under MAX_WHEEL_R (42) so a
@@ -413,10 +415,19 @@ function buildGroundBodies(world, segments, baseY, category, conditions) {
         sandZones.push(seg);
         break;
       }
-      case 'water':
-        addBox(cx, baseY + 20, w, 40, 0, conditions.water.friction, 'water');
+      case 'water': {
+        // Water's actual collision floor is a real recessed lake bed, well
+        // below the normal ground line — not a same-height box with a
+        // small upward nudge like before. The chassis freefalls briefly on
+        // entry (nothing solid at the normal height anymore), then a
+        // spring-based buoyancy force in onBeforeUpdate pulls it back
+        // toward a computed equilibrium depth. This floor is what stops it
+        // from sinking forever if that math ever fails to catch up in
+        // time — a hard safety net, not the primary "floating" mechanism.
+        addBox(cx, baseY + WATER_PIT_DEPTH + 20, w, 40, 0, conditions.water.friction, 'water');
         waterZones.push(seg);
         break;
+      }
       case 'ice':
         addBox(cx, baseY + 20, w, 40, 0, conditions.ice.friction, 'ice');
         break;
@@ -582,7 +593,14 @@ function mountWheels(car, points, features) {
 
   const wheels = offsets.map(off => {
     const w = Bodies.fromVertices(cx + off.x, cy + off.y, [vertices], {
-      friction: 0.85, frictionStatic: 1.0, density: 0.0035, restitution: 0,
+      // friction/frictionStatic raised from 0.85/1.0 — measured headless: at
+      // the old values, commanded wheel spin implied a ~65 units/s surface
+      // speed but the chassis only actually achieved ~2 units/s (a real
+      // traction/wheelspin bottleneck, not a "target speed too low"
+      // problem — cranking BASE_DRIVE_SPEED alone just wasted more spin
+      // without moving the car any faster). Higher friction lets much more
+      // of that commanded spin actually convert into forward force.
+      friction: 1.5, frictionStatic: 2.2, density: 0.0035, restitution: 0,
       collisionFilter: filter,
       render: { fillStyle: car.color === PLAYER_COLOR ? '#f2c14e' : '#3ddc97' }
     }, true);
@@ -822,9 +840,25 @@ function build3DTerrain(laneGround, laneSceneX) {
     // as real terrain instead of a flat colored slab.
     if (isRock) addRockDecor(group, b, laneGround, laneSceneX);
     else if (b.groundType === 'sand') addDuneDecor(group, b, laneGround, laneSceneX);
+    else if (b.groundType === 'water') addWaterSurfaceDecor(group, b, laneGround, laneSceneX);
   }
   three.scene.add(group);
   return group;
+}
+
+// The water body's own mesh (drawn above, matching its physics box exactly)
+// now renders as a lake bed far below the normal ground line — see
+// WATER_PIT_DEPTH. This adds a translucent surface plane back at the
+// ORIGINAL ground height (laneGround.baseY, ignoring the body's own
+// recessed position) so there's something to visibly sink below, with the
+// lake bed dimly visible underneath through the transparency.
+function addWaterSurfaceDecor(group, b, laneGround, laneSceneX) {
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x5fb3e0, transparent: true, opacity: 0.55, roughness: 0.25, metalness: 0.1
+  });
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(LANE_VISUAL_WIDTH, 6, b._w), mat);
+  mesh.position.set(laneSceneX, 0, -b.position.x); // y=0 in scene space == laneGround.baseY, the original ground line
+  group.add(mesh);
 }
 
 // The ground itself is kept close to flat (see buildGroundBodies) — the
@@ -1004,6 +1038,16 @@ function onBeforeUpdate() {
   for (const car of [player, ai]) {
     if (car.finished) continue;
     const seg = segmentAt(track.segments, car.chassis.position.x);
+
+    // chassis.velocity.x reads misleadingly close to 0 at a lot of
+    // instantaneous samples (confirmed headless: real forward progress
+    // measured via position delta while raw velocity.x reads ~0.000 at
+    // that same instant) — smoothing it makes it an actually reliable
+    // signal for both the ice-slip check below and the AI's stuck/slow
+    // retry check further down.
+    const rawSpeed = Math.abs(car.chassis.velocity.x);
+    car.smoothSpeed = car.smoothSpeed === undefined ? rawSpeed : car.smoothSpeed + (rawSpeed - car.smoothSpeed) * 0.1;
+
     const mul = terrainDriveMultiplier(seg, car.wheelFeatures || {}, raceConditions);
     // targetSpeed here is angular velocity, and actual ground speed is
     // angularVelocity * radius — so without this correction, a bigger wheel
@@ -1111,28 +1155,93 @@ function onBeforeUpdate() {
         for (let d = 0; d < burst; d++) spawnDust(pool, sceneX, sceneY, sceneZ);
       }
     }
-    // water buoyancy-ish force — strength rolled per race (see raceConditions)
+    // Water: the car actually sinks below the normal ground line (see the
+    // recessed WATER_PIT_DEPTH floor in buildGroundBodies) and settles at
+    // an equilibrium depth like a real floating object. This is driven
+    // directly by position (lerping the chassis+wheels toward the target
+    // depth each frame) rather than Matter force/impulse — a force-based
+    // spring was wildly unpredictable to tune against this game's existing
+    // gravity/force scale (three-plus orders of magnitude of trial and
+    // error for a barely-perceptible result), and a player can't tell the
+    // difference between "real spring physics" and "smoothly eased toward
+    // the target depth" here — both just look like floating. WATER_PIT_DEPTH's
+    // solid floor stays as a hard backstop regardless. "Density" is a
+    // stand-in built from the wheel's own shape (wider/bigger = more
+    // displacement = floats higher), same "shape decides the terrain" idea
+    // as everywhere else, just applied to floating instead of rolling.
     if (seg && seg.type === 'water') {
-      const buoyancy = (raceConditions && raceConditions.water) ? raceConditions.water.buoyancy : 0.0009;
-      Body.applyForce(car.chassis, car.chassis.position, { x: 0, y: -buoyancy * car.chassis.mass });
+      const wf = car.wheelFeatures || {};
+      const widthFactor = Math.max(0.5, Math.min(1.6, wf.widthRatio || 1));
+      const sizeFactor = Math.max(0.6, Math.min(1.4, (car.wheelRadius || REFERENCE_WHEEL_R) / REFERENCE_WHEEL_R));
+      const displacement = widthFactor * 0.6 + sizeFactor * 0.6; // ~0.7 (dense/small) .. 1.9 (wide/big, floats higher)
+
+      const equilibriumDepth = 46 / displacement; // px below the surface — higher displacement floats shallower
+      const targetY = car.groundY + equilibriumDepth;
+      const dy = (targetY - car.chassis.position.y) * 0.08; // closes ~8%/frame -> settles in well under a second at 60fps
+      Body.translate(car.chassis, { x: 0, y: dy });
+      Body.translate(car.wheelA, { x: 0, y: dy });
+      Body.translate(car.wheelB, { x: 0, y: dy });
+
+      // The deeper you're sitting, the more resistance — on top of the
+      // paddle-vs-plain-wheel speed multiplier from terrainDriveMultiplier.
+      const submersion = car.chassis.position.y - car.groundY;
+      const depthDrag = Math.max(0, Math.min(0.06, submersion / 4000));
+      Body.setVelocity(car.chassis, {
+        x: car.chassis.velocity.x * (1 - depthDrag),
+        y: car.chassis.velocity.y * 0.6 // damp vertical velocity so it doesn't fight the position-based settle or bob forever
+      });
+    }
+
+    // Ice: low friction alone wasn't a real failure mode, just "a bit
+    // slidey" — going fast enough that the ice can't keep up now actually
+    // costs you: some forward speed bleeds off as a backward slip, and a
+    // destabilizing spin builds up for as long as you're overspeeding. The
+    // spin direction is picked once per slip episode (not re-randomized
+    // every frame) so it actually accumulates toward a flip if sustained,
+    // instead of jittering back and forth and cancelling out.
+    if (seg && seg.type === 'ice') {
+      const ICE_SAFE_SPEED = 1.8; // calibrated against smoothed real-world cruise speed (~1.5-2.7 units/s observed headless), not the aspirational drive-target constant
+      const speed = car.smoothSpeed;
+      if (speed > ICE_SAFE_SPEED) {
+        if (!car.iceSlipDir) car.iceSlipDir = Math.random() < 0.5 ? 1 : -1;
+        const overspeed = speed - ICE_SAFE_SPEED;
+        const severity = Math.min(1, overspeed / 4);
+        Body.setVelocity(car.chassis, { x: car.chassis.velocity.x - overspeed * 0.12, y: car.chassis.velocity.y });
+        Body.setAngularVelocity(car.chassis, car.chassis.angularVelocity + car.iceSlipDir * severity * 0.012 * PHYSICS_SUBSTEPS);
+      } else {
+        car.iceSlipDir = null;
+      }
     }
 
     trackTelemetry(car, seg);
     handleStuckAndFlip(car);
 
-    // If the AI is genuinely stuck (not just slow) on the current obstacle,
-    // let it try a different wheel instead of staying frozen for the rest
-    // of the race. Cooldown prevents spamming the API with retries.
-    // updateAIWheelForSegment -> mountWheels -> switchRun scores the stuck
-    // attempt under the old wheel and starts a clean run for the new one,
-    // so there's no need to manually zero anything here.
-    if (car === ai && seg && seg.type !== 'flat' && seg.type !== 'finish' &&
-        car.currentRun && car.currentRun.stuckMs > 3200) {
+    // The AI swaps wheels only after being continuously SLOW (not just
+    // fully stalled) for a sustained window — it was previously swapping
+    // off near-zero-speed stuckMs, which made it thrash between wheels far
+    // too eagerly. Now: speed has to stay under AI_SLOW_SPEED for
+    // AI_SLOW_DURATION_MS without recovering, and the timer resets the
+    // moment it gets back up to speed, so a brief slow patch mid-obstacle
+    // doesn't trigger a swap. Cooldown still prevents API spam.
+    // updateAIWheelForSegment -> mountWheels -> switchRun scores the slow
+    // attempt under the old wheel and starts a clean run for the new one.
+    if (car === ai && seg && seg.type !== 'flat' && seg.type !== 'finish') {
+      const AI_SLOW_SPEED = 1.0;      // ~20 on the HUD's displayed scale (statSpeed renders velocity * 20)
+      const AI_SLOW_DURATION_MS = 3000;
       const now = performance.now();
-      if (!car.lastRetryAt || now - car.lastRetryAt > 3500) {
+      if (car.smoothSpeed < AI_SLOW_SPEED) {
+        if (!car.slowSince) car.slowSince = now;
+      } else {
+        car.slowSince = null;
+      }
+      if (car.slowSince && now - car.slowSince > AI_SLOW_DURATION_MS &&
+          (!car.lastRetryAt || now - car.lastRetryAt > 3500)) {
         car.lastRetryAt = now;
+        car.slowSince = null;
         updateAIWheelForSegment(seg);
       }
+    } else if (car === ai) {
+      car.slowSince = null;
     }
   }
   updateCameraAndHud();
@@ -1223,11 +1332,27 @@ function handleStuckAndFlip(car) {
   if (normTilt > 100) {
     if (!car.flippedSince) car.flippedSince = performance.now();
     else if (performance.now() - car.flippedSince > 1400) {
+      // Flipping now sends you all the way back to the start line, instead
+      // of righting the car where it lay — a real penalty, so a wheel that
+      // flips is genuinely bad rather than just briefly inconvenient.
+      // finalizeRun scores the attempt that ended in the flip before the
+      // reset, so the failure is what gets recorded (rather than being
+      // silently dropped, or bleeding into the post-reset run).
+      finalizeRun(car);
       Body.setAngle(car.chassis, 0);
-      Body.setPosition(car.chassis, { x: car.chassis.position.x, y: car.groundY - 80 });
-      Body.setVelocity(car.chassis, { x: 1, y: 0 });
+      Body.setPosition(car.chassis, { x: RACE_START_X, y: car.groundY - 80 });
+      Body.setVelocity(car.chassis, { x: 0, y: 0 });
       Body.setAngularVelocity(car.chassis, 0);
+      for (const wheel of [car.wheelA, car.wheelB]) {
+        if (!wheel) continue;
+        Body.setPosition(wheel, { x: RACE_START_X, y: car.groundY - 80 + 16 });
+        Body.setVelocity(wheel, { x: 0, y: 0 });
+        Body.setAngularVelocity(wheel, 0);
+      }
+      car.smoothSpeed = 0;
+      car.currentSegIndex = -1; // force trackTelemetry to open a fresh run for wherever the car now is
       car.flippedSince = null;
+      logLine(`${car === player ? 'You' : 'AI'} flipped — back to the start.`);
     }
   } else car.flippedSince = null;
 
