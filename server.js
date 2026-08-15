@@ -276,27 +276,27 @@ const autotrainStatus = {
 async function fetchCandidates(terrainType) {
   if (!pool) return [];
   const { rows } = await pool.query(
-    `SELECT wheel_points, score FROM examples
+    `SELECT wheel_points, wheel_features, score FROM examples
      WHERE terrain_type = $1
      ORDER BY score DESC
      LIMIT $2`,
     [terrainType, AUTOTRAIN_CANDIDATE_LIMIT]
   );
-  return rows.map(r => ({ wheelPoints: r.wheel_points, score: r.score }));
+  return rows.map(r => ({ wheelPoints: r.wheel_points, wheelFeatures: r.wheel_features, score: r.score }));
 }
 
 async function autotrainStep() {
   const terrainType = TERRAIN_TYPES[Math.floor(Math.random() * TERRAIN_TYPES.length)];
   const candidates = await fetchCandidates(terrainType);
-  const { points, reason } = pickWheel(candidates);
-  const result = await runTrial(terrainType, points);
+  const { points, widthScale, reason } = pickWheel(candidates);
+  const result = await runTrial(terrainType, points, widthScale);
 
   await insertExample({
     playerId: AUTOTRAIN_PLAYER_ID,
     terrainType: result.terrainType,
     terrainFeatures: [],
     wheelPoints: result.wheelPoints.map(p => [p.x, p.y]),
-    wheelFeatures: [result.wheelFeatures.maxR, result.wheelFeatures.widthRatio, result.wheelFeatures.protrusions, result.wheelFeatures.irregularity],
+    wheelFeatures: [result.wheelFeatures.maxR, result.wheelFeatures.widthRatio, result.wheelFeatures.protrusions, result.wheelFeatures.irregularity, result.wheelFeatures.widthScale || 1],
     score: result.score,
     source: 'ai'
   });

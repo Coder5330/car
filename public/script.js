@@ -1515,14 +1515,14 @@ async function aiGenerateWheel(terrainType) {
     const res = await fetch(`/api/examples?terrainType=${terrainType}&limit=8`);
     if (!res.ok) {
       console.warn(`AI: /api/examples returned ${res.status} for ${terrainType} — check /api/health (likely a DB connection issue).`);
-      return { points: coldStartWheel(terrainType), reason: `server error (${res.status}) — cold-start` };
+      return { points: coldStartWheel(terrainType), widthScale: coldStartWidthScale(), reason: `server error (${res.status}) — cold-start` };
     }
     const examples = await res.json();
     if (examples.length === 0) {
-      return { points: coldStartWheel(terrainType), reason: 'no human data yet — cold-start' };
+      return { points: coldStartWheel(terrainType), widthScale: coldStartWidthScale(), reason: 'no human data yet — cold-start' };
     }
     if (Math.random() <= 0.15) {
-      return { points: coldStartWheel(terrainType), reason: `cold-start (random roll, ${examples.length} examples available)` };
+      return { points: coldStartWheel(terrainType), widthScale: coldStartWidthScale(), reason: `cold-start (random roll, ${examples.length} examples available)` };
     }
     // imitate a strong human example, weighted toward higher scores, with mutation
     const weights = examples.map(e => e.score * e.score + 1);
@@ -1531,10 +1531,19 @@ async function aiGenerateWheel(terrainType) {
     for (let i = 0; i < examples.length; i++) { r -= weights[i]; if (r <= 0) { pick = examples[i]; break; } }
     const jitter = 6;
     const points = pick.wheelPoints.map(([x, y]) => ({ x: x + (Math.random() - 0.5) * jitter, y: y + (Math.random() - 0.5) * jitter }));
-    return { points, reason: `imitating score-${pick.score} human wheel (${examples.length} available)` };
+    // wheelFeatures[4] is widthScale (see submitExample) — without reading
+    // this back, a stored example that scored well partly BECAUSE of a wide
+    // tyre would get reconstructed at neutral 1x width every time the AI
+    // imitates it (computeWheelFeatures always defaults widthScale to 1,
+    // since that's a slider value with no way to read it back out of a
+    // drawn outline), silently losing whatever made it good. Jittered a
+    // little too so the AI can drift toward better widths, not just copy.
+    const pickWidth = (pick.wheelFeatures && typeof pick.wheelFeatures[4] === 'number') ? pick.wheelFeatures[4] : 1;
+    const widthScale = Math.max(0.4, Math.min(2.5, pickWidth + (Math.random() - 0.5) * 0.3));
+    return { points, widthScale, reason: `imitating score-${pick.score} human wheel (${examples.length} available)` };
   } catch (e) {
     console.warn('AI: /api/examples fetch failed — check network/console (falling back to cold-start):', e);
-    return { points: coldStartWheel(terrainType), reason: 'fetch failed — cold-start' };
+    return { points: coldStartWheel(terrainType), widthScale: coldStartWidthScale(), reason: 'fetch failed — cold-start' };
   }
 }
 
@@ -1551,12 +1560,20 @@ function coldStartWheel(terrainType) {
   return pts;
 }
 
+// Random tyre width for cold-start, same "mostly clueless, sometimes
+// stumbles onto something good" spirit as coldStartWheel — otherwise the
+// AI would never explore width at all outside of imitating stored data.
+function coldStartWidthScale() {
+  return 0.4 + Math.random() * 2.1;
+}
+
 async function updateAIWheelForSegment(seg) {
   if (!seg || seg.type === 'flat' || seg.type === 'finish') return;
-  const { points, reason } = await aiGenerateWheel(seg.type);
+  const { points, widthScale, reason } = await aiGenerateWheel(seg.type);
   logLine(`${seg.type.toUpperCase()}: ${reason}`);
   const features = computeWheelFeatures(points);
   features.rawPoints = points;
+  features.widthScale = widthScale;
   mountWheels(ai, points, features);
 }
 
