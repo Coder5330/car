@@ -219,12 +219,14 @@ function createAmbientSandPool(count) {
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  // Brighter near-white-gold and a bigger/more opaque point than the first
-  // pass — the original pale tan (0xf3e2ab) at size 2.2 barely read against
-  // bright sand/dunes of a similar color; contrast matters more than raw
-  // particle size for these actually being visible.
+  // Brighter near-white-gold for contrast against similarly-colored sand.
+  // Size was bumped way up (to 30) while chasing an invisibility bug that
+  // actually turned out to be a frustum-culling bug, not a size/contrast
+  // one (see frustumCulled below) — now that they render at all, 30 reads
+  // as oversized chunks rather than sand grains. Back down to a size that's
+  // still comfortably visible at sizeAttenuation:false without dominating.
   const mat = new THREE.PointsMaterial({
-    color: 0xfff8e0, size: 30, sizeAttenuation: false,
+    color: 0xfff8e0, size: 8, sizeAttenuation: false,
     transparent: true, opacity: 0.85, depthWrite: false
   });
   const points = new THREE.Points(geo, mat);
