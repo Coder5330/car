@@ -228,6 +228,14 @@ function createAmbientSandPool(count) {
     transparent: true, opacity: 0.85, depthWrite: false
   });
   const points = new THREE.Points(geo, mat);
+  // THREE computes a Points object's frustum-culling bounding sphere lazily,
+  // once, on its first render — and caches it. At that moment every particle
+  // is still parked at AMBIENT_SAND_FAR (all identical, far off-screen), so
+  // the cached sphere never intersects the camera frustum again: the whole
+  // system silently stops rendering forever, no matter how many particles
+  // later move to visible positions. This pool moves every frame, so just
+  // skip frustum culling for it entirely.
+  points.frustumCulled = false;
   three.scene.add(points);
 
   return { points, positions, vel, life, maxLife, count, cursor: 0 };
@@ -468,13 +476,6 @@ function buildGroundBodies(world, segments, baseY, category, conditions) {
         const amp = conditions.rocks.bumpAmp * 0.65;
         const waveLen = 140 + Math.random() * 140; // px per full up/down cycle
         const phase = Math.random() * Math.PI * 2;
-        // The boulder cluster's left/right position also drifts as a smooth
-        // sine wave along the segment (its own independently-seeded
-        // wavelength/phase) instead of jumping to a random lateral bin every
-        // chunk — a random left/center/right pick each chunk would look just
-        // as jittery/fake sideways as the old per-chunk height noise did.
-        const lateralWaveLen = 220 + Math.random() * 220;
-        const lateralPhase = Math.random() * Math.PI * 2;
         let x = seg.x0;
         while (x < seg.x1) {
           const chunk = Math.min(22 + Math.random() * 18, seg.x1 - x);
@@ -482,11 +483,13 @@ function buildGroundBodies(world, segments, baseY, category, conditions) {
           const bump = Math.sin(((bx - seg.x0) / waveLen) * Math.PI * 2 + phase) * amp;
           const b = addBox(bx, baseY + 20 - bump, chunk + 2, Math.max(14, 40 + bump), 0, 0.95, 'rocks');
           // Tag for the decorative boulder layer (build3DTerrain). Corner
-          // style is still an independent per-chunk coin flip so sharp/round
-          // boulders mix throughout; lateral position follows the smooth
-          // wave above.
+          // style is an independent per-chunk coin flip so sharp/round
+          // boulders mix throughout. Lateral position is plain per-chunk
+          // randomness, not a smooth wave — a smooth drift read as the
+          // boulder field visibly sweeping left-right as you drove past,
+          // which looked like it was moving rather than just being scattered.
           b._rockSharp = Math.random() < 0.5;
-          b._rockLateral = Math.sin(((bx - seg.x0) / lateralWaveLen) * Math.PI * 2 + lateralPhase);
+          b._rockLateral = Math.random() * 2 - 1;
           x += chunk;
         }
         break;
