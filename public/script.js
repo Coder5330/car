@@ -1362,8 +1362,16 @@ function finalizeRun(car) {
   car.currentRun = null;
   const distance = Math.max(0, car.chassis.position.x - run.startX);
   const timeMs = Math.max(1, performance.now() - run.startTime);
+  // segmentLength is the distance REMAINING from wherever the run actually
+  // started, not the full segment — a run doesn't always start at the
+  // segment's x0. The AI's wheel swap in particular awaits a network fetch
+  // before mounting, during which it keeps driving on the OLD wheel and
+  // covers real ground; scoring against the full segment length silently
+  // capped completion (and score) on every AI swap regardless of how good
+  // the new wheel was. Mid-segment human wheel swaps have the same issue.
+  const segmentLength = Math.max(1, run.seg.x1 - run.startX);
   const telemetry = {
-    distance, segmentLength: run.seg.len, timeMs,
+    distance, segmentLength, timeMs,
     avgSpeed: distance / (timeMs / 1000), stuckMs: run.stuckMs,
     maxTiltDeg: run.maxTiltDeg, flippedOver: run.maxTiltDeg > 100
   };
