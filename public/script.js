@@ -259,30 +259,36 @@ function buildGroundBodies(world, segments, baseY, category, conditions) {
         addBox(cx, baseY + 20, w, 40, 0, conditions.ice.friction, 'ice');
         break;
       case 'rocks': {
-        // Chunk width AND each chunk's own bump size are randomized
-        // per-chunk (not just the overall amplitude rolled once per race in
-        // conditions.rocks) so one rocks segment reads as a genuinely
-        // uneven field — some wide gentle rises, some narrow sharp jolts —
-        // instead of one uniform difficulty repeated the whole way across.
-        // Chunks are narrow (22-40px, was 32-62px) so there are noticeably
-        // more of them per segment, and the height swing between adjacent
-        // chunks is large enough that the chassis actually has to rock and
-        // tilt crossing them instead of gliding over a near-flat top.
-        const amp = conditions.rocks.bumpAmp;
-        let x = seg.x0, i = 0;
+        // Ground elevation genuinely rises and falls (real jolts, not a
+        // flattened-out ride) but follows a smooth continuous sine wave
+        // instead of independent per-chunk noise — adjacent chunks used to
+        // jump around unpredictably, which read as random jitter rather than
+        // terrain. Wavelength and phase are re-rolled with Math.random()
+        // every time the track is built, so the hills are a different shape
+        // every race, not one fixed wave.
+        const amp = conditions.rocks.bumpAmp * 0.65;
+        const waveLen = 140 + Math.random() * 140; // px per full up/down cycle
+        const phase = Math.random() * Math.PI * 2;
+        // The boulder cluster's left/right position also drifts as a smooth
+        // sine wave along the segment (its own independently-seeded
+        // wavelength/phase) instead of jumping to a random lateral bin every
+        // chunk — a random left/center/right pick each chunk would look just
+        // as jittery/fake sideways as the old per-chunk height noise did.
+        const lateralWaveLen = 220 + Math.random() * 220;
+        const lateralPhase = Math.random() * Math.PI * 2;
+        let x = seg.x0;
         while (x < seg.x1) {
           const chunk = Math.min(22 + Math.random() * 18, seg.x1 - x);
-          const localAmp = amp * (0.6 + Math.random() * 1.2);
-          const bump = Math.max(-32, Math.min(32, (Math.sin(i * 1.7) * 0.4 + (Math.random() - 0.5) * 0.9) * localAmp));
           const bx = x + chunk / 2;
+          const bump = Math.sin(((bx - seg.x0) / waveLen) * Math.PI * 2 + phase) * amp;
           const b = addBox(bx, baseY + 20 - bump, chunk + 2, Math.max(14, 40 + bump), 0, 0.95, 'rocks');
-          // Tag for the decorative boulder layer (build3DTerrain) — corner
-          // style and lateral bin are independent random rolls so a single
-          // rocks segment mixes sharp/round boulders across left/center/
-          // right instead of looking like one repeated prop.
+          // Tag for the decorative boulder layer (build3DTerrain). Corner
+          // style is still an independent per-chunk coin flip so sharp/round
+          // boulders mix throughout; lateral position follows the smooth
+          // wave above.
           b._rockSharp = Math.random() < 0.5;
-          b._rockLateral = Math.random() * 2 - 1;
-          x += chunk; i++;
+          b._rockLateral = Math.sin(((bx - seg.x0) / lateralWaveLen) * Math.PI * 2 + lateralPhase);
+          x += chunk;
         }
         break;
       }
@@ -569,27 +575,38 @@ const threeGroups = { terrainPlayer: null, terrainAI: null, decor: [] };
 // A small procedural mottled-gray canvas texture, generated once and reused
 // on every rock surface (collision boxes and boulders alike) — otherwise
 // rocks are just flat-shaded solid color, which reads as plastic, not stone.
-let rockTextureCache = null;
-function getRockTexture() {
-  if (rockTextureCache) return rockTextureCache;
+// Three distinct variants (different base tone + speckle mix), picked
+// per-rock, so a dense field of boulders doesn't look like the same rock
+// copy-pasted hundreds of times.
+const ROCK_TEXTURE_VARIANTS = [
+  { base: [140, 137, 128], speckleLo: [80, 76, 68], speckleHi: [190, 184, 168] },  // pale grey granite
+  { base: [110, 96, 82], speckleLo: [60, 50, 40], speckleHi: [150, 128, 104] },    // warm brown sandstone
+  { base: [96, 100, 102], speckleLo: [50, 54, 58], speckleHi: [140, 146, 150] }    // cool slate grey
+];
+const rockTextureCache = [];
+function getRockTexture(variant) {
+  const idx = ((variant | 0) % ROCK_TEXTURE_VARIANTS.length + ROCK_TEXTURE_VARIANTS.length) % ROCK_TEXTURE_VARIANTS.length;
+  if (rockTextureCache[idx]) return rockTextureCache[idx];
+  const { base, speckleLo, speckleHi } = ROCK_TEXTURE_VARIANTS[idx];
   const size = 128;
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#8c8a83';
+  ctx.fillStyle = `rgb(${base[0]},${base[1]},${base[2]})`;
   ctx.fillRect(0, 0, size, size);
   for (let i = 0; i < 1100; i++) {
     const x = Math.random() * size, y = Math.random() * size;
     const r = 0.6 + Math.random() * 3.2;
-    const shade = 80 + Math.random() * 100;
-    ctx.fillStyle = `rgba(${shade},${Math.round(shade * 0.94)},${Math.round(shade * 0.85)},${0.3 + Math.random() * 0.4})`;
+    const t = Math.random();
+    const c = [0, 1, 2].map(ch => Math.round(speckleLo[ch] + (speckleHi[ch] - speckleLo[ch]) * t));
+    ctx.fillStyle = `rgba(${c[0]},${c[1]},${c[2]},${0.3 + Math.random() * 0.4})`;
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
   }
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  rockTextureCache = tex;
+  rockTextureCache[idx] = tex;
   return tex;
 }
 
@@ -600,7 +617,7 @@ function build3DTerrain(laneGround, laneSceneX) {
     const isRock = b.groundType === 'rocks';
     const mat = new THREE.MeshStandardMaterial({
       color, flatShading: true, roughness: 0.85,
-      map: isRock ? getRockTexture() : undefined
+      map: isRock ? getRockTexture(Math.floor(Math.random() * 3)) : undefined
     });
     if (isRock) mat.map.repeat.set(Math.max(1, b._w / 30), 3);
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(LANE_VISUAL_WIDTH, b._h, b._w), mat);
@@ -618,29 +635,27 @@ function build3DTerrain(laneGround, laneSceneX) {
   return group;
 }
 
-// Scatters several boulders per rock chunk (2-4, was 1-2 — "a lot more of
-// them"): some angular/low-poly ("sharp"), some higher-detail and smooth-
-// shaded ("round"), textured with the same mottled-stone map as the ground
-// itself, at a randomized left/center/right lateral position across the
-// lane (b._rockLateral, rolled in buildGroundBodies) so a rocks segment
-// doesn't read as one repeated prop marching straight down the middle.
-// Boulder size tracks the chunk's own bump height so bigger jolts visually
-// look like bigger rocks — the same height variation the chassis actually
-// rocks and tilts over, not just a flat platform with props glued on top.
+// The ground itself is kept close to flat (see buildGroundBodies) — the
+// difficulty and the look of "rocks" terrain both come from sheer boulder
+// density instead: 8-15 boulders per chunk, roughly 3-5x the old count, mixing
+// angular low-poly ("sharp") and smooth higher-detail ("round") shapes, each
+// picking one of 3 stone texture variants, scattered at randomized left/
+// center/right lateral positions (b._rockLateral, rolled in
+// buildGroundBodies) so a rocks segment reads as a dense, varied field
+// instead of one repeated prop marching down the middle.
 function addRockDecor(group, b, laneGround, laneSceneX) {
   const topY = -(b.position.y - laneGround.baseY) + b._h / 2;
   const z = -b.position.x;
-  const bumpMag = Math.abs(b._h - 40);
-  const count = 2 + Math.floor(Math.random() * 3);
+  const count = 8 + Math.floor(Math.random() * 8);
   for (let k = 0; k < count; k++) {
     const sharp = (k === 0 && b._rockSharp !== undefined) ? b._rockSharp : Math.random() < 0.5;
-    const baseR = 6 + Math.min(18, bumpMag * 0.4) + Math.random() * (k === 0 ? 8 : 4);
+    const baseR = 5 + Math.random() * 15;
     const geo = sharp ? new THREE.IcosahedronGeometry(baseR, 0) : new THREE.IcosahedronGeometry(baseR, 1);
     const grey = 0.5 + Math.random() * 0.28;
     const warmth = Math.random() * 0.14;
     const mat = new THREE.MeshStandardMaterial({
       color: new THREE.Color(grey + warmth, grey * 0.9, grey * 0.78),
-      flatShading: sharp, roughness: 0.92, map: getRockTexture()
+      flatShading: sharp, roughness: 0.92, map: getRockTexture(Math.floor(Math.random() * 3))
     });
     const mesh = new THREE.Mesh(geo, mat);
     const lateral = (k === 0 && b._rockLateral !== undefined) ? b._rockLateral : (Math.random() * 2 - 1);
