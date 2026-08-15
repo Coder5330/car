@@ -174,7 +174,7 @@ function rollRaceConditions() {
     sand: { friction: rand(0.9, 1.4), wideBias: rand(0.65, 1.05) },
     water: { friction: rand(0.15, 0.45), buoyancy: rand(0.0006, 0.0014), densityFactor: rand(0.7, 1.6) },
     ice: { friction: rand(0.01, 0.05) },
-    rocks: { bumpAmp: rand(10, 24) },
+    rocks: { bumpAmp: rand(16, 34) },
     steep: { angle: rand(0.22, 0.42) } // radians, climbing
   };
 }
@@ -240,10 +240,17 @@ function buildGroundBodies(world, segments, baseY, category, conditions) {
         }
         break;
       }
-      case 'sand':
-        addBox(cx, baseY + 20, w, 40, 0, conditions.sand.friction, 'sand');
+      case 'sand': {
+        // One physics box for the whole segment (sand's collision behavior
+        // is a uniform property), but tag it with everything the visual
+        // dune layer needs to lay down several independently-randomized
+        // dune ridges across it (see build3DTerrain / addDuneDecor) instead
+        // of one flat-colored slab.
+        const b = addBox(cx, baseY + 20, w, 40, 0, conditions.sand.friction, 'sand');
+        b._duneCount = 3 + Math.floor(w / 260);
         sandZones.push(seg);
         break;
+      }
       case 'water':
         addBox(cx, baseY + 20, w, 40, 0, conditions.water.friction, 'water');
         waterZones.push(seg);
@@ -252,12 +259,30 @@ function buildGroundBodies(world, segments, baseY, category, conditions) {
         addBox(cx, baseY + 20, w, 40, 0, conditions.ice.friction, 'ice');
         break;
       case 'rocks': {
-        const chunk = 45, n = Math.floor(w / chunk);
+        // Chunk width AND each chunk's own bump size are randomized
+        // per-chunk (not just the overall amplitude rolled once per race in
+        // conditions.rocks) so one rocks segment reads as a genuinely
+        // uneven field — some wide gentle rises, some narrow sharp jolts —
+        // instead of one uniform difficulty repeated the whole way across.
+        // Chunks are narrow (22-40px, was 32-62px) so there are noticeably
+        // more of them per segment, and the height swing between adjacent
+        // chunks is large enough that the chassis actually has to rock and
+        // tilt crossing them instead of gliding over a near-flat top.
         const amp = conditions.rocks.bumpAmp;
-        for (let i = 0; i < n; i++) {
-          const bump = (Math.sin(i * 1.7) * 0.5 + (Math.random() - 0.5)) * amp;
-          const bx = seg.x0 + i * chunk + chunk / 2;
-          addBox(bx, baseY + 20 - bump, chunk + 2, 40 + bump, 0, 0.95, 'rocks');
+        let x = seg.x0, i = 0;
+        while (x < seg.x1) {
+          const chunk = Math.min(22 + Math.random() * 18, seg.x1 - x);
+          const localAmp = amp * (0.6 + Math.random() * 1.2);
+          const bump = Math.max(-32, Math.min(32, (Math.sin(i * 1.7) * 0.4 + (Math.random() - 0.5) * 0.9) * localAmp));
+          const bx = x + chunk / 2;
+          const b = addBox(bx, baseY + 20 - bump, chunk + 2, Math.max(14, 40 + bump), 0, 0.95, 'rocks');
+          // Tag for the decorative boulder layer (build3DTerrain) — corner
+          // style and lateral bin are independent random rolls so a single
+          // rocks segment mixes sharp/round boulders across left/center/
+          // right instead of looking like one repeated prop.
+          b._rockSharp = Math.random() < 0.5;
+          b._rockLateral = Math.random() * 2 - 1;
+          x += chunk; i++;
         }
         break;
       }
@@ -541,18 +566,115 @@ let ai = null;
 let raceRunning = false;
 const threeGroups = { terrainPlayer: null, terrainAI: null, decor: [] };
 
+// A small procedural mottled-gray canvas texture, generated once and reused
+// on every rock surface (collision boxes and boulders alike) — otherwise
+// rocks are just flat-shaded solid color, which reads as plastic, not stone.
+let rockTextureCache = null;
+function getRockTexture() {
+  if (rockTextureCache) return rockTextureCache;
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#8c8a83';
+  ctx.fillRect(0, 0, size, size);
+  for (let i = 0; i < 1100; i++) {
+    const x = Math.random() * size, y = Math.random() * size;
+    const r = 0.6 + Math.random() * 3.2;
+    const shade = 80 + Math.random() * 100;
+    ctx.fillStyle = `rgba(${shade},${Math.round(shade * 0.94)},${Math.round(shade * 0.85)},${0.3 + Math.random() * 0.4})`;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  rockTextureCache = tex;
+  return tex;
+}
+
 function build3DTerrain(laneGround, laneSceneX) {
   const group = new THREE.Group();
   for (const b of laneGround.bodies) {
     const color = TERRAIN_COLOR3D[b.groundType] || 0x666666;
-    const mat = new THREE.MeshStandardMaterial({ color, flatShading: true, roughness: 0.85 });
+    const isRock = b.groundType === 'rocks';
+    const mat = new THREE.MeshStandardMaterial({
+      color, flatShading: true, roughness: 0.85,
+      map: isRock ? getRockTexture() : undefined
+    });
+    if (isRock) mat.map.repeat.set(Math.max(1, b._w / 30), 3);
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(LANE_VISUAL_WIDTH, b._h, b._w), mat);
     mesh.position.set(laneSceneX, -(b.position.y - laneGround.baseY), -b.position.x);
     mesh.rotation.x = -b._angle;
     group.add(mesh);
+
+    // Purely cosmetic detail on top of the exact collision box above — the
+    // box stays what you actually stand/climb on, these just make it read
+    // as real terrain instead of a flat colored slab.
+    if (isRock) addRockDecor(group, b, laneGround, laneSceneX);
+    else if (b.groundType === 'sand') addDuneDecor(group, b, laneGround, laneSceneX);
   }
   three.scene.add(group);
   return group;
+}
+
+// Scatters several boulders per rock chunk (2-4, was 1-2 — "a lot more of
+// them"): some angular/low-poly ("sharp"), some higher-detail and smooth-
+// shaded ("round"), textured with the same mottled-stone map as the ground
+// itself, at a randomized left/center/right lateral position across the
+// lane (b._rockLateral, rolled in buildGroundBodies) so a rocks segment
+// doesn't read as one repeated prop marching straight down the middle.
+// Boulder size tracks the chunk's own bump height so bigger jolts visually
+// look like bigger rocks — the same height variation the chassis actually
+// rocks and tilts over, not just a flat platform with props glued on top.
+function addRockDecor(group, b, laneGround, laneSceneX) {
+  const topY = -(b.position.y - laneGround.baseY) + b._h / 2;
+  const z = -b.position.x;
+  const bumpMag = Math.abs(b._h - 40);
+  const count = 2 + Math.floor(Math.random() * 3);
+  for (let k = 0; k < count; k++) {
+    const sharp = (k === 0 && b._rockSharp !== undefined) ? b._rockSharp : Math.random() < 0.5;
+    const baseR = 6 + Math.min(18, bumpMag * 0.4) + Math.random() * (k === 0 ? 8 : 4);
+    const geo = sharp ? new THREE.IcosahedronGeometry(baseR, 0) : new THREE.IcosahedronGeometry(baseR, 1);
+    const grey = 0.5 + Math.random() * 0.28;
+    const warmth = Math.random() * 0.14;
+    const mat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(grey + warmth, grey * 0.9, grey * 0.78),
+      flatShading: sharp, roughness: 0.92, map: getRockTexture()
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    const lateral = (k === 0 && b._rockLateral !== undefined) ? b._rockLateral : (Math.random() * 2 - 1);
+    const lateralPx = lateral * (LANE_VISUAL_WIDTH / 2 - baseR - 6);
+    const along = (Math.random() - 0.5) * Math.max(0, b._w - baseR);
+    mesh.position.set(laneSceneX + lateralPx, topY + baseR * 0.3, z + along);
+    mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+    group.add(mesh);
+  }
+}
+
+// Lays down several independently-sized/positioned dune mounds across a
+// sand chunk (count rolled per chunk in buildGroundBodies) instead of one
+// flat tan box, so the same sand segment shows genuine ridges and gaps
+// rather than a uniform slab.
+function addDuneDecor(group, b, laneGround, laneSceneX) {
+  const topY = -(b.position.y - laneGround.baseY) + b._h / 2;
+  const z = -b.position.x;
+  const count = b._duneCount || 3;
+  for (let k = 0; k < count; k++) {
+    const radius = 24 + Math.random() * 32;
+    const geo = new THREE.SphereGeometry(radius, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2);
+    const shade = 0.8 + Math.random() * 0.16;
+    const mat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(0.91 * shade, 0.8 * shade, 0.52 * shade),
+      flatShading: true, roughness: 1
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.scale.y = 0.3 + Math.random() * 0.2;
+    const lateral = (Math.random() * 2 - 1) * Math.max(0, LANE_VISUAL_WIDTH / 2 - radius * 0.5);
+    const along = (Math.random() - 0.5) * Math.max(0, b._w - radius * 0.6);
+    mesh.position.set(laneSceneX + lateral, topY - 1, z + along);
+    group.add(mesh);
+  }
 }
 
 function clearGroup(group) {
