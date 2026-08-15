@@ -142,6 +142,22 @@ body{
   cursor:crosshair;
 }
 
+.width-control{
+  background:var(--panel-2);
+  border:1px solid var(--line);
+  border-radius:4px;
+  padding:8px 10px;
+}
+.width-control label{
+  display:flex;justify-content:space-between;
+  font-size:11px;color:var(--muted);letter-spacing:1px;
+}
+.width-control label span{color:var(--teal);font-weight:700;}
+.width-control input[type=range]{
+  width:100%;margin:7px 0 4px;accent-color:var(--teal);cursor:pointer;
+}
+.width-hint{font-size:10px;color:var(--muted);line-height:1.35;}
+
 .blueprint-readout{
   background:var(--panel-2);
   border:1px solid var(--line);

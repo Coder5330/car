@@ -49,6 +49,12 @@
 
       <canvas id="drawCanvas" width="280" height="280"></canvas>
 
+      <div class="width-control">
+        <label for="wheelWidth">TYRE WIDTH <span id="wheelWidthVal">1.0x</span></label>
+        <input type="range" id="wheelWidth" min="0.4" max="2.5" step="0.1" value="1" />
+        <div class="width-hint">wider = more displacement: floats higher in water, sinks less in sand</div>
+      </div>
+
       <div class="blueprint-readout" id="blueprintReadout">
         <div class="bp-row"><span>RADIUS</span><span id="bpRadius">--</span></div>
         <div class="bp-row"><span>WIDTH RATIO</span><span id="bpWidth">--</span></div>

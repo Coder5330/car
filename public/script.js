@@ -29,7 +29,13 @@ const LANE_GAP = 210; // vertical world-space separation between the two lanes
 const AI_GROUND_Y = PLAYER_GROUND_Y + LANE_GAP;
 const SEG_LEN = 900;
 const BUFFER_LEN = 160;
-const BASE_DRIVE_SPEED = 2.2; // wheel angular velocity target — was 0.5, then 0.85; still felt way too slow overall (segments were taking minutes to cross instead of single-digit seconds)
+// Wheel angular velocity target, in rad per physics step. Set to land near
+// the measured traction peak (~0.3 rad/step after the radiusCorrection in
+// onBeforeUpdate) rather than far past it — see the drive-tuning note in
+// onBeforeUpdate. Higher values here spin the tyres uselessly and are
+// measurably SLOWER, which is why previous "just raise the speed" attempts
+// (0.5 -> 0.85 -> 2.2) never actually helped.
+const BASE_DRIVE_SPEED = 0.4;
 const PHYSICS_SUBSTEPS = 4; // see loop() — physics runs in smaller steps to avoid tunneling through thin ground
 const DRIVE_RESPONSE = 0.22; // how fast the wheel's spin ramps toward its target, per animation frame — was 0.16, snappier now that BASE_DRIVE_SPEED is much higher
 const MAX_CHASSIS_ANGULAR_VELOCITY = 0.03; // hard cap on chassis spin rate, per animation frame — see onBeforeUpdate
@@ -96,6 +102,8 @@ const resultBody = document.getElementById('resultBody');
 const aiLogBody = document.getElementById('aiLogBody');
 const bpRadius = document.getElementById('bpRadius');
 const bpWidth = document.getElementById('bpWidth');
+const wheelWidthSlider = document.getElementById('wheelWidth');
+const wheelWidthVal = document.getElementById('wheelWidthVal');
 const bpTread = document.getElementById('bpTread');
 const bpIrreg = document.getElementById('bpIrreg');
 
@@ -510,7 +518,16 @@ function computeWheelFeatures(points) {
     if (binMax[i] > meanR * 1.15 && binMax[i] >= prev && binMax[i] >= next) protrusions++;
   }
 
-  return { centroid: { x: cx, y: cy }, maxR, widthRatio, irregularity, protrusions };
+  // widthScale ("how fat is the tyre") is a separate axis from the drawn
+  // outline — the drawing is a side-on profile, so it can't encode tyre
+  // width. It defaults to neutral here and is overridden from the player's
+  // slider at mount time (see btnUseWheel); the AI and replayed training
+  // examples only carry the outline, so they correctly stay at 1.
+  return { centroid: { x: cx, y: cy }, maxR, widthRatio, irregularity, protrusions, widthScale: 1 };
+}
+
+function currentWidthScale() {
+  return wheelWidthSlider ? parseFloat(wheelWidthSlider.value) || 1 : 1;
 }
 
 function pointsToPhysicsVertices(points, features) {
@@ -649,6 +666,7 @@ function mountWheels(car, points, features) {
     car.currentRun = null;
   }
 
+  car.lastWheelVertices = vertices; // kept so the width slider can rebuild the mesh without a remount
   if (car.mesh3D) updateWheelMesh3D(car, vertices);
 }
 
@@ -694,9 +712,12 @@ function updateWheelMesh3D(car, localVertices) {
   const shape = new THREE.Shape();
   localVertices.forEach((v, i) => i === 0 ? shape.moveTo(v.x, -v.y) : shape.lineTo(v.x, -v.y));
   shape.closePath();
-  const geo = new THREE.ExtrudeGeometry(shape, { depth: WHEEL_THICKNESS, bevelEnabled: false, steps: 1 });
+  // Extrusion depth follows the tyre-width slider, so a "fat" tyre visibly
+  // looks fat — the same number that drives its water/sand displacement.
+  const thickness = WHEEL_THICKNESS * ((car.wheelFeatures && car.wheelFeatures.widthScale) || 1);
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: thickness, bevelEnabled: false, steps: 1 });
   geo.rotateY(Math.PI / 2);
-  geo.translate(-WHEEL_THICKNESS / 2, 0, 0);
+  geo.translate(-thickness / 2, 0, 0);
 
   const m = car.mesh3D;
   const oldGeo = m.wheelFL.geometry, oldGeo2 = m.wheelRL.geometry;
@@ -1076,6 +1097,25 @@ function onBeforeUpdate() {
       Body.setAngularVelocity(wheel, newAV);
     }
 
+    // NOTE ON DRIVE TUNING (measured, not guessed):
+    // The commanded wheel spin used to be far higher than the tyres could
+    // ever convert into motion — headless measurement showed the wheels
+    // spinning at an implied ~2400 px/s of surface speed while the car
+    // actually travelled ~1.8 px/s, a grip efficiency of 0.07%. In other
+    // words the tyres were spinning free almost the entire time, exactly
+    // like flooring it on ice. A controlled sweep of the commanded spin
+    // found ground speed PEAKS at roughly 0.3 rad/step and gets *worse*
+    // above it, so BASE_DRIVE_SPEED is now set to land near that peak
+    // instead of far past it (measured ~2.5x faster in A/B tests).
+    //
+    // Things that were tried and measurably did NOT help, so don't redo
+    // them: raising BASE_DRIVE_SPEED further, raising wheel/ground
+    // friction, lowering frictionAir, and pushing the chassis directly
+    // with applyForce (a trace showed body.force accumulating across
+    // frames while chassis velocity stayed pinned at exactly 0, so
+    // force-based propulsion doesn't reach the chassis here at all —
+    // that's still an open question worth a proper look).
+
     // Stair assist: when traversing stairs, apply wheel-level forward+up
     // forces and temporarily boost wheel friction so teeth/wide treads can
     // convert spin into forward progress instead of slipping. Restore
@@ -1140,7 +1180,10 @@ function onBeforeUpdate() {
     // sand extra drag
     if (seg && seg.type === 'sand') {
       const bias = (raceConditions && raceConditions.sand) ? raceConditions.sand.wideBias : 0.8;
-      const wideness = Math.max(0, Math.min(1, ((car.wheelFeatures || {}).widthRatio - bias) / 1.2));
+      // Tyre width counts toward "floats over sand" the same way drawn
+      // wideness does — see the width slider in index.html.
+      const wf = car.wheelFeatures || {};
+      const wideness = Math.max(0, Math.min(1, ((wf.widthRatio || 1) * (wf.widthScale || 1) - bias) / 1.2));
       const drag = 0.985 - 0.01 * (1 - wideness);
       Body.setVelocity(car.chassis, { x: car.chassis.velocity.x * drag, y: car.chassis.velocity.y });
 
@@ -1173,7 +1216,10 @@ function onBeforeUpdate() {
       const wf = car.wheelFeatures || {};
       const widthFactor = Math.max(0.5, Math.min(1.6, wf.widthRatio || 1));
       const sizeFactor = Math.max(0.6, Math.min(1.4, (car.wheelRadius || REFERENCE_WHEEL_R) / REFERENCE_WHEEL_R));
-      const displacement = widthFactor * 0.6 + sizeFactor * 0.6; // ~0.7 (dense/small) .. 1.9 (wide/big, floats higher)
+      // Tyre width (the slider) is the most direct displacement lever — a
+      // fat tyre pushes aside more water and rides higher.
+      const tyreFactor = Math.max(0.4, Math.min(2.5, wf.widthScale || 1));
+      const displacement = (widthFactor * 0.6 + sizeFactor * 0.6) * tyreFactor; // higher = floats shallower
 
       const equilibriumDepth = 46 / displacement; // px below the surface — higher displacement floats shallower
       const targetY = car.groundY + equilibriumDepth;
@@ -1441,7 +1487,7 @@ async function submitExample(car, terrainType, telemetry, localScore) {
         terrainType,
         terrainFeatures: [],
         wheelPoints: toSend.map(p => [p.x, p.y]),
-        wheelFeatures: [car.wheelFeatures.maxR, car.wheelFeatures.widthRatio, car.wheelFeatures.protrusions, car.wheelFeatures.irregularity],
+        wheelFeatures: [car.wheelFeatures.maxR, car.wheelFeatures.widthRatio, car.wheelFeatures.protrusions, car.wheelFeatures.irregularity, car.wheelFeatures.widthScale || 1],
         telemetry,
         source: car === player ? 'human' : 'ai'
       })
@@ -1570,9 +1616,23 @@ btnUseWheel.addEventListener('click', () => {
   if (!player || strokePoints.length < 6) return;
   const features = computeWheelFeatures(strokePoints);
   features.rawPoints = strokePoints.slice();
+  features.widthScale = currentWidthScale(); // player-only axis, see computeWheelFeatures
   mountWheels(player, strokePoints, features);
-  logLine('Mounted new wheel — measuring performance live.');
+  logLine(`Mounted new wheel (tyre width ${features.widthScale.toFixed(1)}x) — measuring performance live.`);
 });
+
+if (wheelWidthSlider) {
+  wheelWidthSlider.addEventListener('input', () => {
+    const v = currentWidthScale();
+    wheelWidthVal.textContent = v.toFixed(1) + 'x';
+    // Live-apply to the mounted wheel so the slider is immediately visible
+    // and testable without having to redraw and remount first.
+    if (player && player.wheelFeatures) {
+      player.wheelFeatures.widthScale = v;
+      if (player.mesh3D && player.lastWheelVertices) updateWheelMesh3D(player, player.lastWheelVertices);
+    }
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Rendering — real 3D chase camera. Terrain/car meshes were already built

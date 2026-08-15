@@ -245,15 +245,14 @@ app.get('/api/health', async (req, res) => {
 // AI opponent to imitate too (see the design note above insertExample).
 // ---------------------------------------------------------------------------
 const AUTOTRAIN_PLAYER_ID = 'autotrain_bot';
-// Pace between trials. Render's free tier bills instance-hours while the
-// service is actually awake (it spins down after ~15min with no incoming
-// HTTP traffic, and this loop goes down with it — it doesn't force the
-// service to stay awake by itself), but a tight loop still burns CPU the
-// whole time the service IS up. 15s keeps it comfortably "always training"
-// without meaningfully competing with real request handling or running up
-// usage on a free-tier deploy. Tune down further (or set
-// AUTOTRAIN_ENABLED=false) if that's still too much for your plan.
-const AUTOTRAIN_TRIAL_DELAY_MS = 15000;
+// Pace between trials. A single trial is only tens of milliseconds of
+// actual physics work, and Render's free tier spins the service down after
+// ~15min with no incoming HTTP traffic — this loop goes down with it and
+// can't hold the service awake by itself. So even at a tight interval the
+// realistic worst case is a short burst of cheap work after each visit,
+// not a background process quietly eating instance-hours. Set
+// AUTOTRAIN_ENABLED=false to turn it off entirely.
+const AUTOTRAIN_TRIAL_DELAY_MS = 1200;
 const AUTOTRAIN_CANDIDATE_LIMIT = 10;
 
 const autotrainStatus = {
