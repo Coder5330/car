@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Autotrain — AI Wheel Racing</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:        #0b0d10;
+    --panel:     #14181d;
+    --panel-2:   #1b2128;
+    --line:      #263140;
+    --text:      #e8e6df;
+    --muted:     #7c8896;
+    --hazard:    #f2c14e;
+    --teal:      #3ddc97;
+    --danger:    #e6553a;
+    --font-display: 'Rajdhani', sans-serif;
+    --font-mono: 'Space Mono', monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;min-height:100%;}
+  body{
+    background:var(--bg); color:var(--text); font-family:var(--font-mono);
+    padding:20px; max-width:1200px; margin:0 auto;
+  }
+  a{color:var(--teal);}
+  header{
+    display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;
+    padding:14px 18px; background:var(--panel); border:1px solid var(--line); border-radius:6px; margin-bottom:18px;
+  }
+  .brand{font-family:var(--font-display); font-weight:700; font-size:22px; letter-spacing:2px;}
+  .brand .mark{color:var(--hazard);}
+  .status-row{display:flex; align-items:center; gap:18px; flex-wrap:wrap;}
+  .pill{
+    font-family:var(--font-display); font-weight:700; font-size:12px; letter-spacing:1.5px;
+    padding:5px 12px; border-radius:20px; border:1px solid var(--line);
+  }
+  .pill.running{color:#00251a; background:var(--teal); border-color:var(--teal);}
+  .pill.stopped{color:var(--text); background:var(--panel-2); border-color:var(--danger); color:var(--danger);}
+  .stat{display:flex; flex-direction:column; line-height:1.15;}
+  .stat-label{font-size:10px; color:var(--muted); letter-spacing:1.5px;}
+  .stat-val{font-family:var(--font-display); font-size:19px; font-weight:600; color:var(--text);}
+
+  .grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:16px;}
+  .card{
+    background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:14px 16px;
+  }
+  .card h3{
+    margin:0 0 10px; font-family:var(--font-display); font-size:16px; letter-spacing:1.5px;
+    text-transform:uppercase; color:var(--hazard); display:flex; justify-content:space-between; align-items:baseline;
+  }
+  .card h3 .n{font-size:11px; color:var(--muted); letter-spacing:0; text-transform:none;}
+  .score-row{display:flex; gap:18px; margin-bottom:10px;}
+  .score-box{flex:1; text-align:center; background:var(--panel-2); border:1px solid var(--line); border-radius:4px; padding:8px 4px;}
+  .score-box .label{font-size:10px; color:var(--muted); letter-spacing:1px;}
+  .score-box .val{font-family:var(--font-display); font-size:24px; font-weight:700; color:var(--teal);}
+  canvas.spark{width:100%; height:90px; display:block; background:var(--panel-2); border:1px solid var(--line); border-radius:4px;}
+
+  .log-card{margin-top:16px;}
+  #logBody{font-size:12px; max-height:220px; overflow-y:auto;}
+  #logBody div{padding:4px 0; border-bottom:1px dotted var(--line); color:var(--muted);}
+  #logBody div b{color:var(--text);}
+  .empty{color:var(--muted); font-size:12px; padding:20px 0; text-align:center;}
+  .backlink{font-size:12px; color:var(--muted);}
+  .hidden{display:none !important;}
+</style>
+</head>
+<body>
+
+  <header>
+    <div class="brand"><span class="mark">⌁</span> AUTOTRAIN — SELF-PLAY</div>
+    <div class="status-row">
+      <span id="statusPill" class="pill stopped">CHECKING…</span>
+      <div class="stat"><span class="stat-label">TOTAL TRIALS</span><span class="stat-val" id="totalTrials">--</span></div>
+      <div class="stat"><span class="stat-label">UPTIME</span><span class="stat-val" id="uptime">--</span></div>
+      <div class="stat"><span class="stat-label">TRIALS/MIN</span><span class="stat-val" id="rate">--</span></div>
+      <a class="backlink" href="/">&larr; back to game</a>
+    </div>
+  </header>
+
+  <div id="dbWarning" class="card hidden" style="border-color:var(--danger); margin-bottom:16px;">
+    No database configured on this deploy (DATABASE_URL not set) — autotrain has nothing to write to or read from.
+  </div>
+
+  <div class="grid" id="terrainGrid"></div>
+
+  <div class="card log-card">
+    <h3>RECENT TRIALS</h3>
+    <div id="logBody"><div class="empty">waiting for first trial…</div></div>
+  </div>
+
+<script>
+const TERRAIN_TYPES = ['stairs', 'sand', 'water', 'ice', 'rocks', 'steep'];
+const grid = document.getElementById('terrainGrid');
+const cards = {};
+
+TERRAIN_TYPES.forEach(t => {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <h3>${t} <span class="n" id="n-${t}">0 trials</span></h3>
+    <div class="score-row">
+      <div class="score-box"><div class="label">AVG (latest)</div><div class="val" id="avg-${t}">--</div></div>
+      <div class="score-box"><div class="label">BEST</div><div class="val" id="max-${t}">--</div></div>
+    </div>
+    <canvas class="spark" id="chart-${t}" width="600" height="90"></canvas>
+  `;
+  grid.appendChild(card);
+  cards[t] = card;
+});
+
+function fmtUptime(ms) {
+  if (!ms || ms < 0) return '--';
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h > 0 ? `${h}h ${m}m` : (m > 0 ? `${m}m ${sec}s` : `${sec}s`);
+}
+
+const logSeen = new Set();
+function pushLog(entry) {
+  const key = entry.at + ':' + entry.terrainType;
+  if (logSeen.has(key)) return;
+  logSeen.add(key);
+  const body = document.getElementById('logBody');
+  const empty = body.querySelector('.empty');
+  if (empty) empty.remove();
+  const div = document.createElement('div');
+  const time = new Date(entry.at).toLocaleTimeString();
+  div.innerHTML = `[${time}] <b>${entry.terrainType.toUpperCase()}</b> score=${entry.score} — ${entry.reason}`;
+  body.prepend(div);
+  while (body.children.length > 40) body.removeChild(body.lastChild);
+}
+
+function drawSpark(canvas, points) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  if (!points || points.length === 0) {
+    ctx.fillStyle = '#7c8896';
+    ctx.font = '12px monospace';
+    ctx.fillText('no data yet', 10, h / 2);
+    return;
+  }
+  const pad = 8;
+  const maxScore = 100;
+  const n = points.length;
+  const stepX = n > 1 ? (w - pad * 2) / (n - 1) : 0;
+
+  // gridline at score=50
+  ctx.strokeStyle = '#263140';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  const midY = pad + (h - pad * 2) * (1 - 50 / maxScore);
+  ctx.moveTo(pad, midY); ctx.lineTo(w - pad, midY);
+  ctx.stroke();
+
+  // max score line (dim)
+  ctx.strokeStyle = '#3a4a5a';
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const x = pad + i * stepX;
+    const y = pad + (h - pad * 2) * (1 - Math.max(0, Math.min(100, p.maxScore)) / maxScore);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // avg score line (bright)
+  ctx.strokeStyle = '#3ddc97';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const x = pad + i * stepX;
+    const y = pad + (h - pad * 2) * (1 - Math.max(0, Math.min(100, p.avgScore)) / maxScore);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+async function refreshStatus() {
+  try {
+    const res = await fetch('/api/autotrain/status');
+    const s = await res.json();
+    const pill = document.getElementById('statusPill');
+    if (s.running) { pill.textContent = 'RUNNING'; pill.className = 'pill running'; }
+    else { pill.textContent = s.enabled ? 'IDLE' : 'STOPPED'; pill.className = 'pill stopped'; }
+
+    document.getElementById('totalTrials').textContent = s.totalTrials;
+    document.getElementById('uptime').textContent = fmtUptime(s.startedAt ? Date.now() - s.startedAt : null);
+    const minutes = s.startedAt ? Math.max(1 / 60, (Date.now() - s.startedAt) / 60000) : 1;
+    document.getElementById('rate').textContent = s.totalTrials > 0 ? (s.totalTrials / minutes).toFixed(1) : '--';
+
+    document.getElementById('dbWarning').classList.toggle('hidden', s.enabled || s.totalTrials > 0);
+
+    TERRAIN_TYPES.forEach(t => {
+      document.getElementById(`n-${t}`).textContent = `${s.trialsByTerrain[t] || 0} trials`;
+    });
+    if (s.lastTrial) pushLog(s.lastTrial);
+  } catch (e) {
+    console.warn('status fetch failed', e);
+  }
+}
+
+async function refreshHistory() {
+  for (const t of TERRAIN_TYPES) {
+    try {
+      const res = await fetch(`/api/autotrain/history?terrainType=${t}&bucketMs=30000`);
+      const rows = await res.json();
+      const canvas = document.getElementById(`chart-${t}`);
+      drawSpark(canvas, rows);
+      if (rows.length > 0) {
+        const last = rows[rows.length - 1];
+        document.getElementById(`avg-${t}`).textContent = last.avgScore;
+        const best = rows.reduce((m, r) => Math.max(m, r.maxScore), 0);
+        document.getElementById(`max-${t}`).textContent = best;
+      }
+    } catch (e) {
+      console.warn(`history fetch failed for ${t}`, e);
+    }
+  }
+}
+
+async function tick() {
+  await refreshStatus();
+  await refreshHistory();
+}
+tick();
+setInterval(tick, 3000);
+</script>
+</body>
+</html>

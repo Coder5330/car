@@ -83,6 +83,41 @@ Check `/api/health` on the deployed URL after it's up — it runs `SELECT 1`
 against Neon and tells you immediately if the connection string is wrong,
 rather than you having to dig through logs.
 
+## Autotrain: headless self-play
+
+`/autotrain` is a live dashboard for a background self-play loop that runs
+inside this same process (no separate worker/service). It uses
+`lib/autotrainSim.js` — a pure Matter.js physics harness with no rendering —
+to repeatedly: pick a random terrain, imitate-and-mutate (or cold-start)
+from the current best stored examples for that terrain (same procedure the
+in-browser AI opponent uses), simulate the attempt, score it, and write the
+result back. Because there's no rendering or real-time waiting, a trial that
+would take ~10-20 simulated seconds to watch finishes in well under a second
+of actual wall-clock time — dozens of trials per minute.
+
+**Design change from the original MVP:** `GET /api/examples` used to only
+return `source = 'human'` rows, on the theory that the AI shouldn't learn
+from its own unverified guesses. That guard matters for a self-*reported*
+label; it doesn't apply here, because every score in this table is a real
+physics measurement (the wheel actually climbed the actual stairs, or it
+didn't) — not a model's opinion about its own output. So human and
+autotrain (`source = 'ai'`) examples now compete purely on score, which is
+what actually lets self-play improve the pool over time (standard self-play
+/ reinforcement-learning pattern, not "grading its own homework"). The
+autotrain bot writes under a fixed `player_id` (`autotrain_bot`) and is
+capped at 60 stored examples per terrain just like a human player, so it
+can't grow the table unbounded — the cap keeps a rolling "hall of fame" of
+its best results so far.
+
+Verified locally (see PR history / commit messages): stairs' average score
+climbed 0 → 27.5 → 32.7 → 96.0 across four 10-second buckets in a single
+short run, with the bot's own log showing it imitating its prior best
+example each round.
+
+Disable it on a given deploy with `AUTOTRAIN_ENABLED=false`; it also simply
+no-ops (with a log line) if `DATABASE_URL` isn't set, same as the rest of
+the app in DB-less mode.
+
 ## Hardening ideas (not in this MVP)
 
 - Re-simulate the reported run server-side (send the full input/telemetry
