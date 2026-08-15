@@ -511,6 +511,16 @@ function buildGroundBodies(world, segments, baseY, category, conditions) {
 // ---------------------------------------------------------------------------
 // Wheel geometry from drawn points
 // ---------------------------------------------------------------------------
+// Re-orders points by angle around their own centroid, restoring a simple
+// (non-self-intersecting) star-shaped polygon after per-point jitter has
+// scrambled the original drawing order. See aiGenerateWheel for why this
+// matters — mirrored in lib/autotrainSim.js, keep in sync.
+function sortPointsByAngle(points) {
+  const cx = points.reduce((s, p) => s + p.x, 0) / points.length;
+  const cy = points.reduce((s, p) => s + p.y, 0) / points.length;
+  return points.slice().sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+}
+
 function computeWheelFeatures(points) {
   const cx = points.reduce((s, p) => s + p.x, 0) / points.length;
   const cy = points.reduce((s, p) => s + p.y, 0) / points.length;
@@ -1580,7 +1590,18 @@ async function aiGenerateWheel(terrainType) {
     let r = Math.random() * total, pick = examples[0];
     for (let i = 0; i < examples.length; i++) { r -= weights[i]; if (r <= 0) { pick = examples[i]; break; } }
     const jitter = 6;
-    const points = pick.wheelPoints.map(([x, y]) => ({ x: x + (Math.random() - 0.5) * jitter, y: y + (Math.random() - 0.5) * jitter }));
+    // Independent per-point jitter can nudge adjacent points past each
+    // other, turning an originally simple (angularly-ordered) outline into
+    // a self-intersecting one — harmless for the physics body (poly-decomp
+    // copes with concave/crossed input), but THREE.ExtrudeGeometry's
+    // triangulator breaks badly on it, rendering as a garbled cluster of
+    // stray triangles instead of a wheel. Re-sorting by angle around the
+    // centroid restores a simple star-shaped polygon after jitter — cheap
+    // and correct as long as jitter doesn't reorder points past their
+    // neighbors, which ±3px against a wheel-sized radius never does. This
+    // compounds across AI generations imitating its own past output, so it
+    // needs to hold on every jitter, not just the first one.
+    const points = sortPointsByAngle(pick.wheelPoints.map(([x, y]) => ({ x: x + (Math.random() - 0.5) * jitter, y: y + (Math.random() - 0.5) * jitter })));
     // wheelFeatures[4] is widthScale (see submitExample) — without reading
     // this back, a stored example that scored well partly BECAUSE of a wide
     // tyre would get reconstructed at neutral 1x width every time the AI
