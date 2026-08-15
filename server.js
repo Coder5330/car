@@ -250,9 +250,17 @@ const AUTOTRAIN_PLAYER_ID = 'autotrain_bot';
 // ~15min with no incoming HTTP traffic — this loop goes down with it and
 // can't hold the service awake by itself. So even at a tight interval the
 // realistic worst case is a short burst of cheap work after each visit,
-// not a background process quietly eating instance-hours. Set
-// AUTOTRAIN_ENABLED=false to turn it off entirely.
-const AUTOTRAIN_TRIAL_DELAY_MS = 1200;
+// not a background process quietly eating instance-hours.
+//
+// Overridable with AUTOTRAIN_TRIAL_DELAY_MS so the training rate can be
+// tuned on the deploy without a code change (and AUTOTRAIN_ENABLED=false
+// still turns it off entirely). Floored at 50ms: below that the loop stops
+// being physics-bound and just hammers Postgres, since every trial does a
+// count + insert (and sometimes a delete) against Neon.
+const AUTOTRAIN_TRIAL_DELAY_MS = Math.max(
+  50,
+  parseInt(process.env.AUTOTRAIN_TRIAL_DELAY_MS, 10) || 300
+);
 const AUTOTRAIN_CANDIDATE_LIMIT = 10;
 
 const autotrainStatus = {
