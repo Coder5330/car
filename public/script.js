@@ -181,6 +181,81 @@ function updateDust(pool, dt) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Ambient beach sparkle — unlike dustPools (which only kicks up while a car
+// is actively driving through sand), this drifts continuously over any sand
+// segment near the camera, driving or not, so a sand stretch reads as an
+// actual beach rather than an inert texture that only reacts to wheels.
+// ---------------------------------------------------------------------------
+const AMBIENT_SAND_POOL_SIZE = 90;
+let ambientSandPool = null;
+let ambientSandSpawnAccum = 0;
+
+function createAmbientSandPool(count) {
+  const pool = [];
+  const geo = new THREE.TetrahedronGeometry(1.6, 0);
+  for (let i = 0; i < count; i++) {
+    const mat = new THREE.MeshBasicMaterial({ color: 0xf3e2ab, transparent: true, opacity: 0 });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.visible = false;
+    three.scene.add(mesh);
+    pool.push({ mesh, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 1 });
+  }
+  return pool;
+}
+
+function spawnAmbientGrain(sceneX, sceneY, sceneZ) {
+  if (!ambientSandPool) return;
+  let p = ambientSandPool[0];
+  for (let i = 1; i < ambientSandPool.length; i++) if (ambientSandPool[i].life < p.life) p = ambientSandPool[i];
+  p.mesh.position.set(sceneX, sceneY + Math.random() * 30, sceneZ);
+  // Gentle drift, not a kicked-up burst — this is ambient air-borne sand,
+  // not wheel spray.
+  p.vx = (Math.random() - 0.5) * 6;
+  p.vy = 3 + Math.random() * 6;
+  p.vz = (Math.random() - 0.5) * 6;
+  p.maxLife = 1.6 + Math.random() * 1.6;
+  p.life = p.maxLife;
+  p.mesh.visible = true;
+  p.mesh.material.opacity = 0.55;
+  p.mesh.scale.setScalar(0.4 + Math.random() * 0.6);
+}
+
+function updateAmbientSand(dt) {
+  if (!ambientSandPool) return;
+  for (const p of ambientSandPool) {
+    if (p.life <= 0) continue;
+    p.life -= dt;
+    if (p.life <= 0) { p.mesh.visible = false; continue; }
+    p.vy -= 4 * dt; // barely any gravity — these hang in the air, not fall like a spray
+    p.mesh.position.x += p.vx * dt;
+    p.mesh.position.y += p.vy * dt;
+    p.mesh.position.z += p.vz * dt;
+    const t = Math.max(0, p.life / p.maxLife);
+    p.mesh.material.opacity = 0.55 * Math.min(1, t * 2);
+  }
+
+  // Spawn a steady trickle over any sand segment currently near the camera
+  // (both lanes), regardless of whether a car is driving through it.
+  if (!track || !player) return;
+  ambientSandSpawnAccum += dt;
+  const spawnEvery = 0.05; // ~20/sec while any sand is in view
+  if (ambientSandSpawnAccum < spawnEvery) return;
+  ambientSandSpawnAccum = 0;
+
+  const viewX0 = player.chassis.position.x - 300;
+  const viewX1 = player.chassis.position.x + 700;
+  for (const seg of track.segments) {
+    if (seg.type !== 'sand') continue;
+    if (seg.x1 < viewX0 || seg.x0 > viewX1) continue;
+    for (const lane of [{ groundY: PLAYER_GROUND_Y, sceneX: -LANE_X_OFFSET }, { groundY: AI_GROUND_Y, sceneX: LANE_X_OFFSET }]) {
+      const x = Math.max(seg.x0, viewX0) + Math.random() * (Math.min(seg.x1, viewX1) - Math.max(seg.x0, viewX0));
+      const lateral = (Math.random() * 2 - 1) * (LANE_VISUAL_WIDTH / 2 - 6);
+      spawnAmbientGrain(lane.sceneX + lateral, 0, -x);
+    }
+  }
+}
+
 function resizeWorldCanvas() {
   if (!three.renderer) return;
   const w = worldCanvas.clientWidth, h = worldCanvas.clientHeight;
@@ -741,9 +816,17 @@ function addRockDecor(group, b, laneGround, laneSceneX) {
   const topY = -(b.position.y - laneGround.baseY) + b._h / 2;
   const z = -b.position.x;
   const count = 8 + Math.floor(Math.random() * 8);
+  const centerLateral = b._rockLateral !== undefined ? b._rockLateral : 0;
   for (let k = 0; k < count; k++) {
     const sharp = (k === 0 && b._rockSharp !== undefined) ? b._rockSharp : Math.random() < 0.5;
-    const baseR = 5 + Math.random() * 15;
+    // Every boulder gets its own lateral offset around the chunk's smooth
+    // wave center (not just the first one), and — since the physics itself
+    // has no lateral dimension to actually vary height by side (this sim is
+    // 2D side-view: only forward x and vertical y exist) — boulder height
+    // correlates with how far out on that wave it sits, so the field still
+    // visually reads as uneven side-to-side, not just uniform width-wise.
+    const lateral = Math.max(-1, Math.min(1, centerLateral + (Math.random() - 0.5) * 0.9));
+    const baseR = (5 + Math.random() * 10) * (0.7 + 0.6 * Math.abs(lateral));
     const geo = sharp ? new THREE.IcosahedronGeometry(baseR, 0) : new THREE.IcosahedronGeometry(baseR, 1);
     const grey = 0.5 + Math.random() * 0.28;
     const warmth = Math.random() * 0.14;
@@ -752,7 +835,6 @@ function addRockDecor(group, b, laneGround, laneSceneX) {
       flatShading: sharp, roughness: 0.92, map: getRockTexture(Math.floor(Math.random() * 3))
     });
     const mesh = new THREE.Mesh(geo, mat);
-    const lateral = (k === 0 && b._rockLateral !== undefined) ? b._rockLateral : (Math.random() * 2 - 1);
     const lateralPx = lateral * (LANE_VISUAL_WIDTH / 2 - baseR - 6);
     const along = (Math.random() - 0.5) * Math.max(0, b._w - baseR);
     mesh.position.set(laneSceneX + lateralPx, topY + baseR * 0.3, z + along);
@@ -1407,6 +1489,7 @@ function renderWorld() {
   renderWorld._lastT = now;
   updateDust(dustPools.player, dt);
   updateDust(dustPools.ai, dt);
+  updateAmbientSand(dt);
   updateCamera();
   three.renderer.render(three.scene, three.camera);
 }
@@ -1484,6 +1567,7 @@ btnRestart.addEventListener('click', () => { btnStart.disabled = false; startRac
 initThreeScene();
 dustPools.player = createDustPool(DUST_POOL_SIZE);
 dustPools.ai = createDustPool(DUST_POOL_SIZE);
+ambientSandPool = createAmbientSandPool(AMBIENT_SAND_POOL_SIZE);
 initWorld();
 resizeWorldCanvas();
 loop();
