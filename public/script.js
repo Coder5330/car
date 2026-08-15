@@ -186,73 +186,95 @@ function updateDust(pool, dt) {
 // is actively driving through sand), this drifts continuously over any sand
 // segment near the camera, driving or not, so a sand stretch reads as an
 // actual beach rather than an inert texture that only reacts to wheels.
+//
+// This needs to support a LOT of particles at once ("as dense as possible
+// without lag"), so unlike dustPools (individual THREE.Mesh objects — fine
+// at ~50, but each is its own draw call), this is a single THREE.Points
+// object with one shared BufferGeometry: any particle count here costs one
+// draw call, not N. Per-particle state (velocity/life) lives in plain
+// typed arrays on the CPU side and gets written into the position buffer
+// each frame.
 // ---------------------------------------------------------------------------
-const AMBIENT_SAND_POOL_SIZE = 90;
+const AMBIENT_SAND_POOL_SIZE = 2500;
 let ambientSandPool = null;
 let ambientSandSpawnAccum = 0;
+const AMBIENT_SAND_FAR = -100000; // parking spot for inactive particles — off-screen, cheap "invisible"
 
 function createAmbientSandPool(count) {
-  const pool = [];
-  const geo = new THREE.TetrahedronGeometry(1.6, 0);
-  for (let i = 0; i < count; i++) {
-    const mat = new THREE.MeshBasicMaterial({ color: 0xf3e2ab, transparent: true, opacity: 0 });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.visible = false;
-    three.scene.add(mesh);
-    pool.push({ mesh, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 1 });
-  }
-  return pool;
+  const positions = new Float32Array(count * 3);
+  const vel = new Float32Array(count * 3);
+  const life = new Float32Array(count);
+  const maxLife = new Float32Array(count);
+  for (let i = 0; i < count; i++) positions[i * 3 + 1] = AMBIENT_SAND_FAR;
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  // Brighter near-white-gold and a bigger/more opaque point than the first
+  // pass — the original pale tan (0xf3e2ab) at size 2.2 barely read against
+  // bright sand/dunes of a similar color; contrast matters more than raw
+  // particle size for these actually being visible.
+  const mat = new THREE.PointsMaterial({
+    color: 0xfff8e0, size: 5, sizeAttenuation: false,
+    transparent: true, opacity: 0.85, depthWrite: false
+  });
+  const points = new THREE.Points(geo, mat);
+  three.scene.add(points);
+
+  return { points, positions, vel, life, maxLife, count, cursor: 0 };
 }
 
-function spawnAmbientGrain(sceneX, sceneY, sceneZ) {
-  if (!ambientSandPool) return;
-  let p = ambientSandPool[0];
-  for (let i = 1; i < ambientSandPool.length; i++) if (ambientSandPool[i].life < p.life) p = ambientSandPool[i];
-  p.mesh.position.set(sceneX, sceneY + Math.random() * 30, sceneZ);
+function spawnAmbientGrain(pool, sceneX, sceneY, sceneZ) {
+  if (!pool) return;
+  const i = pool.cursor;
+  pool.cursor = (pool.cursor + 1) % pool.count;
+  pool.positions[i * 3] = sceneX;
+  pool.positions[i * 3 + 1] = sceneY + Math.random() * 30;
+  pool.positions[i * 3 + 2] = sceneZ;
   // Gentle drift, not a kicked-up burst — this is ambient air-borne sand,
   // not wheel spray.
-  p.vx = (Math.random() - 0.5) * 6;
-  p.vy = 3 + Math.random() * 6;
-  p.vz = (Math.random() - 0.5) * 6;
-  p.maxLife = 1.6 + Math.random() * 1.6;
-  p.life = p.maxLife;
-  p.mesh.visible = true;
-  p.mesh.material.opacity = 0.55;
-  p.mesh.scale.setScalar(0.4 + Math.random() * 0.6);
+  pool.vel[i * 3] = (Math.random() - 0.5) * 6;
+  pool.vel[i * 3 + 1] = 3 + Math.random() * 6;
+  pool.vel[i * 3 + 2] = (Math.random() - 0.5) * 6;
+  pool.maxLife[i] = 1.6 + Math.random() * 1.6;
+  pool.life[i] = pool.maxLife[i];
 }
 
 function updateAmbientSand(dt) {
   if (!ambientSandPool) return;
-  for (const p of ambientSandPool) {
-    if (p.life <= 0) continue;
-    p.life -= dt;
-    if (p.life <= 0) { p.mesh.visible = false; continue; }
-    p.vy -= 4 * dt; // barely any gravity — these hang in the air, not fall like a spray
-    p.mesh.position.x += p.vx * dt;
-    p.mesh.position.y += p.vy * dt;
-    p.mesh.position.z += p.vz * dt;
-    const t = Math.max(0, p.life / p.maxLife);
-    p.mesh.material.opacity = 0.55 * Math.min(1, t * 2);
+  const pool = ambientSandPool;
+  for (let i = 0; i < pool.count; i++) {
+    if (pool.life[i] <= 0) continue;
+    pool.life[i] -= dt;
+    if (pool.life[i] <= 0) { pool.positions[i * 3 + 1] = AMBIENT_SAND_FAR; continue; }
+    pool.vel[i * 3 + 1] -= 4 * dt; // barely any gravity — these hang in the air, not fall like a spray
+    pool.positions[i * 3] += pool.vel[i * 3] * dt;
+    pool.positions[i * 3 + 1] += pool.vel[i * 3 + 1] * dt;
+    pool.positions[i * 3 + 2] += pool.vel[i * 3 + 2] * dt;
   }
+  pool.points.geometry.attributes.position.needsUpdate = true;
 
-  // Spawn a steady trickle over any sand segment currently near the camera
-  // (both lanes), regardless of whether a car is driving through it.
+  // Spawn a dense, steady trickle over any sand segment currently near the
+  // camera (both lanes), regardless of whether a car is driving through it.
   if (!track || !player) return;
   ambientSandSpawnAccum += dt;
-  const spawnEvery = 0.05; // ~20/sec while any sand is in view
+  const spawnEvery = 1 / 400; // up to ~400/sec while any sand is in view — the pool/lifetime naturally caps steady-state population
   if (ambientSandSpawnAccum < spawnEvery) return;
-  ambientSandSpawnAccum = 0;
+  const bursts = Math.min(40, Math.floor(ambientSandSpawnAccum / spawnEvery));
+  ambientSandSpawnAccum -= bursts * spawnEvery;
 
   const viewX0 = player.chassis.position.x - 300;
   const viewX1 = player.chassis.position.x + 700;
-  for (const seg of track.segments) {
-    if (seg.type !== 'sand') continue;
-    if (seg.x1 < viewX0 || seg.x0 > viewX1) continue;
-    for (const lane of [{ groundY: PLAYER_GROUND_Y, sceneX: -LANE_X_OFFSET }, { groundY: AI_GROUND_Y, sceneX: LANE_X_OFFSET }]) {
-      const x = Math.max(seg.x0, viewX0) + Math.random() * (Math.min(seg.x1, viewX1) - Math.max(seg.x0, viewX0));
-      const lateral = (Math.random() * 2 - 1) * (LANE_VISUAL_WIDTH / 2 - 6);
-      spawnAmbientGrain(lane.sceneX + lateral, 0, -x);
-    }
+  const visibleSandSegs = track.segments.filter(seg => seg.type === 'sand' && seg.x1 >= viewX0 && seg.x0 <= viewX1);
+  if (visibleSandSegs.length === 0) return;
+
+  for (let b = 0; b < bursts; b++) {
+    const seg = visibleSandSegs[Math.floor(Math.random() * visibleSandSegs.length)];
+    const lo = Math.max(seg.x0, viewX0), hi = Math.min(seg.x1, viewX1);
+    const x = lo + Math.random() * Math.max(0, hi - lo);
+    const lane = Math.random() < 0.5
+      ? { sceneX: -LANE_X_OFFSET } : { sceneX: LANE_X_OFFSET };
+    const lateral = (Math.random() * 2 - 1) * (LANE_VISUAL_WIDTH / 2 - 6);
+    spawnAmbientGrain(ambientSandPool, lane.sceneX + lateral, 0, -x);
   }
 }
 
