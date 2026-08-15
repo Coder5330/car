@@ -528,7 +528,7 @@ function createCar(startX, color, group, laneGroundY, laneMask, laneSceneX) {
   });
   const car = { chassis, color, group, mask: laneMask, groundY: laneGroundY, laneSceneX,
     wheelA: null, wheelB: null, cA: null, cB: null, mesh3D: null,
-    driveMul: 1, currentSegIndex: -1, telemetry: null, finished: false, finishTime: null,
+    driveMul: 1, currentSegIndex: -1, currentRun: null, finished: false, finishTime: null,
     flippedSince: null, stuckAccum: 0 };
 
   build3DCarMeshes(car);
@@ -595,17 +595,18 @@ function mountWheels(car, points, features) {
   car.wheelRadius = radius;
   car.wheelBottomOffset = bottomOffset;
 
-  // Record when/where this wheel was installed so telemetry scoring can
-  // attribute performance to the active wheel from the moment it was set
-  // until it changes again.
-  try {
-    car.wheelSetAt = performance.now();
-    car.wheelSetX = car.chassis ? car.chassis.position.x : 0;
-    car.wheelSetStuckBaseline = car.telemetry ? car.telemetry.stuckMs || 0 : 0;
-  } catch (e) {
-    car.wheelSetAt = Date.now();
-    car.wheelSetX = car.chassis ? car.chassis.position.x : 0;
-    car.wheelSetStuckBaseline = 0;
+  // A scored "run" is bound to one (terrain segment, active wheel) pair —
+  // mounting a new wheel always ends whatever run was in progress under the
+  // old one (scoring it right here, not silently dropping it) and starts a
+  // fresh run for the new wheel if the car is currently on scoreable
+  // terrain. switchRun no-ops safely if there's no race in progress yet
+  // (car.currentRun stays null) or track hasn't been built yet (initial
+  // car creation, before the very first mountWheels call has anything to
+  // score against).
+  if (raceRunning && track) {
+    switchRun(car, segmentAt(track.segments, car.chassis.position.x));
+  } else {
+    car.currentRun = null;
   }
 
   if (car.mesh3D) updateWheelMesh3D(car, vertices);
@@ -1100,12 +1101,14 @@ function onBeforeUpdate() {
     // If the AI is genuinely stuck (not just slow) on the current obstacle,
     // let it try a different wheel instead of staying frozen for the rest
     // of the race. Cooldown prevents spamming the API with retries.
+    // updateAIWheelForSegment -> mountWheels -> switchRun scores the stuck
+    // attempt under the old wheel and starts a clean run for the new one,
+    // so there's no need to manually zero anything here.
     if (car === ai && seg && seg.type !== 'flat' && seg.type !== 'finish' &&
-        car.telemetry && car.telemetry.stuckMs > 3200) {
+        car.currentRun && car.currentRun.stuckMs > 3200) {
       const now = performance.now();
       if (!car.lastRetryAt || now - car.lastRetryAt > 3500) {
         car.lastRetryAt = now;
-        car.telemetry.stuckMs = 0; // give the new wheel a clean slate
         updateAIWheelForSegment(seg);
       }
     }
@@ -1114,55 +1117,67 @@ function onBeforeUpdate() {
   checkFinish();
 }
 
+// A scored "run" is the window during which ONE wheel attempts ONE terrain
+// segment: it starts when the car enters a scoreable segment (or, if a
+// wheel is mounted mid-segment, right then) and ends the moment either
+// boundary is crossed — a different wheel gets mounted, or the segment
+// ends — whichever comes first. Previously scoring only ever closed out at
+// segment boundaries, so mounting a new wheel mid-segment silently
+// discarded whatever the OLD wheel had done instead of scoring it, and a
+// tilt/stuck event from the old wheel could bleed into the new wheel's
+// stability score. Routing both boundaries through switchRun/finalizeRun
+// fixes both.
+function switchRun(car, seg) {
+  finalizeRun(car); // scores + submits whatever run was in progress, if any
+  car.currentSegIndex = track.segments.indexOf(seg);
+  if (seg.type !== 'flat' && seg.type !== 'finish') {
+    car.currentRun = {
+      seg, startTime: performance.now(), startX: car.chassis.position.x,
+      stuckMs: 0, maxTiltDeg: 0, lastTick: performance.now()
+    };
+  } else {
+    car.currentRun = null;
+  }
+}
+
+function finalizeRun(car) {
+  const run = car.currentRun;
+  if (!run) return;
+  car.currentRun = null;
+  const distance = Math.max(0, car.chassis.position.x - run.startX);
+  const timeMs = Math.max(1, performance.now() - run.startTime);
+  const telemetry = {
+    distance, segmentLength: run.seg.len, timeMs,
+    avgSpeed: distance / (timeMs / 1000), stuckMs: run.stuckMs,
+    maxTiltDeg: run.maxTiltDeg, flippedOver: run.maxTiltDeg > 100
+  };
+  const score = scoreFromTelemetry(telemetry);
+  submitExample(car, run.seg.type, telemetry, score);
+  if (car === player) {
+    statScore.textContent = score + '/100';
+    logLine(`${run.seg.type.toUpperCase()}: ${score}/100 (you)`);
+  } else {
+    logLine(`${run.seg.type.toUpperCase()}: ${score}/100 (AI)`);
+  }
+}
+
 function trackTelemetry(car, seg) {
   const segIndex = track.segments.indexOf(seg);
   if (segIndex !== car.currentSegIndex) {
-    finalizeSegment(car); // scores the segment we're leaving (if any)
-    car.currentSegIndex = segIndex;
-    car.telemetry = {
-      seg, enterTime: performance.now(), enterX: car.chassis.position.x,
-      stuckMs: 0, maxTiltDeg: 0, lastTick: performance.now()
-    };
+    switchRun(car, seg);
     if (car === player && seg.type !== 'flat' && seg.type !== 'finish') {
       showIncoming(seg.type);
     }
   }
-  if (car.telemetry) {
-    const t = car.telemetry;
+  if (car.currentRun) {
+    const run = car.currentRun;
     const now = performance.now();
-    const dt = now - t.lastTick; t.lastTick = now;
+    const dt = now - run.lastTick; run.lastTick = now;
     const speed = Math.hypot(car.chassis.velocity.x, car.chassis.velocity.y);
-    if (speed < 0.25) t.stuckMs += dt;
+    if (speed < 0.25) run.stuckMs += dt;
     const tiltDeg = Math.abs(car.chassis.angle * 180 / Math.PI) % 360;
     const normTilt = tiltDeg > 180 ? 360 - tiltDeg : tiltDeg;
-    t.maxTiltDeg = Math.max(t.maxTiltDeg, normTilt);
-  }
-}
-
-function finalizeSegment(car) {
-  const t = car.telemetry;
-  if (!t || !t.seg || t.seg.type === 'flat' || t.seg.type === 'finish') { car.telemetry = null; return; }
-  // Use wheel-set time/position if the wheel was mounted after entering
-  // the segment — this attributes the measured telemetry to the active
-  // wheel from the moment it was installed until it changed.
-  const startTime = Math.max(t.enterTime || 0, car.wheelSetAt || 0);
-  const startX = Math.max(t.enterX || 0, car.wheelSetX || 0);
-  const distance = Math.max(0, car.chassis.position.x - startX);
-  const timeMs = Math.max(1, performance.now() - startTime);
-  // Adjust stuckMs to subtract any accumulated stuck time prior to wheel set
-  const stuckMs = Math.max(0, (t.stuckMs || 0) - (car.wheelSetStuckBaseline || 0));
-  const telemetry = {
-    distance, segmentLength: t.seg.len, timeMs,
-    avgSpeed: distance / (timeMs / 1000), stuckMs,
-    maxTiltDeg: t.maxTiltDeg, flippedOver: t.maxTiltDeg > 100
-  };
-  const score = scoreFromTelemetry(telemetry);
-  submitExample(car, t.seg.type, telemetry, score);
-  if (car === player) {
-    statScore.textContent = score + '/100';
-    logLine(`${t.seg.type.toUpperCase()}: ${score}/100 (you)`);
-  } else {
-    logLine(`${t.seg.type.toUpperCase()}: ${score}/100 (AI)`);
+    run.maxTiltDeg = Math.max(run.maxTiltDeg, normTilt);
   }
 }
 
@@ -1194,9 +1209,9 @@ function handleStuckAndFlip(car) {
     }
   } else car.flippedSince = null;
 
-  if (car.telemetry && car.telemetry.stuckMs > 4500) {
+  if (car.currentRun && car.currentRun.stuckMs > 4500) {
     Body.applyForce(car.chassis, car.chassis.position, { x: 0.02 * car.chassis.mass, y: -0.03 * car.chassis.mass });
-    car.telemetry.stuckMs = 0;
+    car.currentRun.stuckMs = 0;
   }
 }
 
@@ -1213,6 +1228,11 @@ function checkFinish() {
 
 function endRace() {
   raceRunning = false;
+  // A car can still be mid-run when the race ends (e.g. stuck on the final
+  // terrain segment when the other car's 15s DNF timeout fires) — score
+  // that partial attempt instead of silently dropping it.
+  finalizeRun(player);
+  finalizeRun(ai);
   const winner = (!ai.finished || (player.finishTime && player.finishTime < ai.finishTime)) ? 'YOU' : 'THE AI';
   resultBody.innerHTML = `
     <div><b>${winner}</b> won the race</div>
