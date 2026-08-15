@@ -432,7 +432,25 @@ function buildGroundBodies(world, segments, baseY, category, conditions) {
         // toward a computed equilibrium depth. This floor is what stops it
         // from sinking forever if that math ever fails to catch up in
         // time — a hard safety net, not the primary "floating" mechanism.
-        addBox(cx, baseY + WATER_PIT_DEPTH + 20, w, 40, 0, conditions.water.friction, 'water');
+        //
+        // The deep floor used to run the full segment width, ending in a
+        // sheer WATER_PIT_DEPTH-tall cliff right at the segment boundary.
+        // A car still riding deep (any wheel whose equilibrium depth is
+        // more than ~40px down — most of them) would be BELOW the next
+        // segment's thin floor slab the instant it crossed that boundary,
+        // with nothing to collide with, and fall straight through the
+        // world. A ramp climbing back to the normal ground line over the
+        // last stretch of the segment closes that gap.
+        const RAMP_LEN = Math.min(300, w * 0.4);
+        const pitWidth = Math.max(0, w - RAMP_LEN);
+        const pitCx = seg.x0 + pitWidth / 2;
+        addBox(pitCx, baseY + WATER_PIT_DEPTH + 20, pitWidth, 40, 0, conditions.water.friction, 'water');
+
+        const rampAngleAbs = Math.atan2(WATER_PIT_DEPTH, RAMP_LEN);
+        const rampLen = Math.hypot(RAMP_LEN, WATER_PIT_DEPTH);
+        const rampCx = seg.x1 - RAMP_LEN / 2;
+        addBox(rampCx, baseY + 20 + WATER_PIT_DEPTH / 2, rampLen, 40, -rampAngleAbs, conditions.water.friction, 'water');
+
         waterZones.push(seg);
         break;
       }
@@ -1221,17 +1239,38 @@ function onBeforeUpdate() {
       const tyreFactor = Math.max(0.4, Math.min(2.5, wf.widthScale || 1));
       const displacement = (widthFactor * 0.6 + sizeFactor * 0.6) * tyreFactor; // higher = floats shallower
 
-      const equilibriumDepth = 46 / displacement; // px below the surface — higher displacement floats shallower
+      let equilibriumDepth = 46 / displacement; // px below the surface — higher displacement floats shallower
+      // Ease the target back toward the surface over the same stretch the
+      // exit ramp climbs (see buildGroundBodies), so the car is actively
+      // rising to meet the ramp instead of relying purely on colliding
+      // with it — the ramp is still there as a hard backstop either way.
+      const RAMP_LEN = Math.min(300, seg.len * 0.4);
+      const distToExit = seg.x1 - car.chassis.position.x;
+      if (distToExit < RAMP_LEN) {
+        equilibriumDepth *= Math.max(0, distToExit / RAMP_LEN);
+      }
       const targetY = car.groundY + equilibriumDepth;
-      const dy = (targetY - car.chassis.position.y) * 0.08; // closes ~8%/frame -> settles in well under a second at 60fps
+      const dyRaw = (targetY - car.chassis.position.y) * 0.08; // closes ~8%/frame -> settles in well under a second at 60fps
+      // Clamp the per-frame teleport distance. Without this, a very deep
+      // equilibrium target (e.g. minimum tyre width) produces a huge first-frame
+      // jump that can shove a wheel still resting on the approach's solid ground
+      // into penetration, triggering a violent single-sided collision response
+      // that spins the chassis and flips the car almost instantly on entry.
+      const dy = Math.max(-3.5, Math.min(3.5, dyRaw));
       Body.translate(car.chassis, { x: 0, y: dy });
       Body.translate(car.wheelA, { x: 0, y: dy });
       Body.translate(car.wheelB, { x: 0, y: dy });
 
       // The deeper you're sitting, the more resistance — on top of the
       // paddle-vs-plain-wheel speed multiplier from terrainDriveMultiplier.
+      // This applies once per animation frame (60/sec), so it compounds:
+      // the old 0-6% range was actually a 0-98% velocity loss per second
+      // at typical submersion depths, which made water nearly uncompletable
+      // regardless of wheel shape. Divisor/cap both cut by 10x so a typical
+      // 50-90px equilibrium depth costs a real but survivable ~15-25%/sec
+      // instead of near-total loss.
       const submersion = car.chassis.position.y - car.groundY;
-      const depthDrag = Math.max(0, Math.min(0.06, submersion / 4000));
+      const depthDrag = Math.max(0, Math.min(0.006, submersion / 40000));
       Body.setVelocity(car.chassis, {
         x: car.chassis.velocity.x * (1 - depthDrag),
         y: car.chassis.velocity.y * 0.6 // damp vertical velocity so it doesn't fight the position-based settle or bob forever
