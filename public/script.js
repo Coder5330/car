@@ -121,6 +121,66 @@ function initThreeScene() {
   three.scene.add(new THREE.AmbientLight(0xffffff, 0.25));
 }
 
+// ---------------------------------------------------------------------------
+// Sand dust particles — small pooled grains kicked up while driving over
+// sand. Purely cosmetic and world-space (not attached to the car group), so
+// it doesn't touch physics. Created once at startup (not rebuilt per race,
+// like the terrain/car meshes are) since the pool itself doesn't depend on
+// anything race-specific.
+// ---------------------------------------------------------------------------
+const DUST_POOL_SIZE = 50;
+const dustPools = { player: null, ai: null };
+
+function createDustPool(count) {
+  const pool = [];
+  const geo = new THREE.TetrahedronGeometry(2.2, 0);
+  for (let i = 0; i < count; i++) {
+    const mat = new THREE.MeshBasicMaterial({ color: 0xe0c98a, transparent: true, opacity: 0 });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.visible = false;
+    three.scene.add(mesh);
+    pool.push({ mesh, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 1 });
+  }
+  return pool;
+}
+
+// Reuses whichever pooled particle has the least life left instead of
+// tracking a separate free-list — cheap enough at DUST_POOL_SIZE=50 and
+// naturally recycles the oldest-looking grain first.
+function spawnDust(pool, sceneX, sceneY, sceneZ) {
+  let p = pool[0];
+  for (let i = 1; i < pool.length; i++) if (pool[i].life < p.life) p = pool[i];
+  p.mesh.position.set(
+    sceneX + (Math.random() - 0.5) * 16,
+    sceneY + Math.random() * 3,
+    sceneZ + (Math.random() - 0.5) * 16
+  );
+  p.vx = (Math.random() - 0.5) * 40;
+  p.vy = 30 + Math.random() * 55;
+  p.vz = (Math.random() - 0.5) * 40;
+  p.maxLife = 0.35 + Math.random() * 0.35;
+  p.life = p.maxLife;
+  p.mesh.visible = true;
+  p.mesh.material.opacity = 0.85;
+  p.mesh.scale.setScalar(0.6 + Math.random() * 0.8);
+}
+
+function updateDust(pool, dt) {
+  if (!pool) return;
+  for (const p of pool) {
+    if (p.life <= 0) continue;
+    p.life -= dt;
+    if (p.life <= 0) { p.mesh.visible = false; continue; }
+    p.vy -= 140 * dt; // gravity pulls each grain back down
+    p.mesh.position.x += p.vx * dt;
+    p.mesh.position.y += p.vy * dt;
+    p.mesh.position.z += p.vz * dt;
+    const t = Math.max(0, p.life / p.maxLife);
+    p.mesh.material.opacity = 0.85 * t;
+    p.mesh.scale.setScalar(0.3 + 0.7 * t);
+  }
+}
+
 function resizeWorldCanvas() {
   if (!three.renderer) return;
   const w = worldCanvas.clientWidth, h = worldCanvas.clientHeight;
@@ -243,11 +303,16 @@ function buildGroundBodies(world, segments, baseY, category, conditions) {
       case 'sand': {
         // One physics box for the whole segment (sand's collision behavior
         // is a uniform property), but tag it with everything the visual
-        // dune layer needs to lay down several independently-randomized
-        // dune ridges across it (see build3DTerrain / addDuneDecor) instead
-        // of one flat-colored slab.
+        // dune layer needs to lay a dense field of dune mounds across it
+        // (see build3DTerrain / addDuneDecor) instead of one flat-colored
+        // slab. Dune height/size follows a smooth sine ridge line — its own
+        // independently-seeded wavelength/phase, re-rolled every time the
+        // track is built — so ripples read as coherent wind-blown dunes
+        // instead of scattered random blobs.
         const b = addBox(cx, baseY + 20, w, 40, 0, conditions.sand.friction, 'sand');
-        b._duneCount = 3 + Math.floor(w / 260);
+        b._duneCount = 10 + Math.floor(w / 30);
+        b._duneWaveLen = 90 + Math.random() * 90;
+        b._dunePhase = Math.random() * Math.PI * 2;
         sandZones.push(seg);
         break;
       }
@@ -610,16 +675,45 @@ function getRockTexture(variant) {
   return tex;
 }
 
+// A small procedural sandy-grain texture, generated once and reused on the
+// base sand box and every dune mound — otherwise sand is just a flat tan
+// slab, which doesn't read as granular.
+let sandTextureCache = null;
+function getSandTexture() {
+  if (sandTextureCache) return sandTextureCache;
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#e9d18c';
+  ctx.fillRect(0, 0, size, size);
+  for (let i = 0; i < 1400; i++) {
+    const x = Math.random() * size, y = Math.random() * size;
+    const r = 0.5 + Math.random() * 1.8;
+    const shade = 190 + Math.random() * 60;
+    ctx.fillStyle = `rgba(${shade},${Math.round(shade * 0.86)},${Math.round(shade * 0.55)},${0.25 + Math.random() * 0.35})`;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  sandTextureCache = tex;
+  return tex;
+}
+
 function build3DTerrain(laneGround, laneSceneX) {
   const group = new THREE.Group();
   for (const b of laneGround.bodies) {
     const color = TERRAIN_COLOR3D[b.groundType] || 0x666666;
     const isRock = b.groundType === 'rocks';
+    const isSand = b.groundType === 'sand';
     const mat = new THREE.MeshStandardMaterial({
       color, flatShading: true, roughness: 0.85,
-      map: isRock ? getRockTexture(Math.floor(Math.random() * 3)) : undefined
+      map: isRock ? getRockTexture(Math.floor(Math.random() * 3)) : (isSand ? getSandTexture() : undefined)
     });
     if (isRock) mat.map.repeat.set(Math.max(1, b._w / 30), 3);
+    if (isSand) mat.map.repeat.set(Math.max(1, b._w / 40), 2);
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(LANE_VISUAL_WIDTH, b._h, b._w), mat);
     mesh.position.set(laneSceneX, -(b.position.y - laneGround.baseY), -b.position.x);
     mesh.rotation.x = -b._angle;
@@ -667,26 +761,31 @@ function addRockDecor(group, b, laneGround, laneSceneX) {
   }
 }
 
-// Lays down several independently-sized/positioned dune mounds across a
-// sand chunk (count rolled per chunk in buildGroundBodies) instead of one
-// flat tan box, so the same sand segment shows genuine ridges and gaps
-// rather than a uniform slab.
+// Lays down a dense field of dune mounds across a sand segment (10+, was
+// 3-6) instead of one flat tan box. Each mound's height/size tracks a smooth
+// sine "ridge line" along the segment (b._duneWaveLen/b._dunePhase, rolled
+// in buildGroundBodies) so the field reads as coherent wind-blown ripples —
+// alternating taller ridges and shallow troughs — rather than random blobs,
+// textured with the same procedural grain map used on the base sand box.
 function addDuneDecor(group, b, laneGround, laneSceneX) {
   const topY = -(b.position.y - laneGround.baseY) + b._h / 2;
   const z = -b.position.x;
-  const count = b._duneCount || 3;
+  const count = b._duneCount || 10;
+  const waveLen = b._duneWaveLen || 120;
+  const phase = b._dunePhase || 0;
   for (let k = 0; k < count; k++) {
-    const radius = 24 + Math.random() * 32;
+    const along = (Math.random() - 0.5) * Math.max(0, b._w);
+    const ridge = 0.5 + 0.5 * Math.sin((along / waveLen) * Math.PI * 2 + phase); // 0..1
+    const radius = 14 + ridge * 34 + Math.random() * 10;
     const geo = new THREE.SphereGeometry(radius, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2);
     const shade = 0.8 + Math.random() * 0.16;
     const mat = new THREE.MeshStandardMaterial({
       color: new THREE.Color(0.91 * shade, 0.8 * shade, 0.52 * shade),
-      flatShading: true, roughness: 1
+      flatShading: true, roughness: 1, map: getSandTexture()
     });
     const mesh = new THREE.Mesh(geo, mat);
-    mesh.scale.y = 0.3 + Math.random() * 0.2;
+    mesh.scale.y = 0.22 + ridge * 0.22 + Math.random() * 0.08;
     const lateral = (Math.random() * 2 - 1) * Math.max(0, LANE_VISUAL_WIDTH / 2 - radius * 0.5);
-    const along = (Math.random() - 0.5) * Math.max(0, b._w - radius * 0.6);
     mesh.position.set(laneSceneX + lateral, topY - 1, z + along);
     group.add(mesh);
   }
@@ -895,6 +994,17 @@ function onBeforeUpdate() {
       const wideness = Math.max(0, Math.min(1, ((car.wheelFeatures || {}).widthRatio - bias) / 1.2));
       const drag = 0.985 - 0.01 * (1 - wideness);
       Body.setVelocity(car.chassis, { x: car.chassis.velocity.x * drag, y: car.chassis.velocity.y });
+
+      // Kick up dust while actually moving through sand — a stalled wheel
+      // shouldn't be throwing grain, only real travel should.
+      if (Math.abs(car.chassis.velocity.x) > 0.6) {
+        const pool = car === player ? dustPools.player : dustPools.ai;
+        const sceneX = car.laneSceneX;
+        const sceneY = -(car.wheelA.position.y - car.groundY);
+        const sceneZ = -car.chassis.position.x;
+        const burst = 2 + Math.floor(Math.random() * 3);
+        for (let d = 0; d < burst; d++) spawnDust(pool, sceneX, sceneY, sceneZ);
+      }
     }
     // water buoyancy-ish force — strength rolled per race (see raceConditions)
     if (seg && seg.type === 'water') {
@@ -1292,6 +1402,11 @@ function renderWorld() {
   if (!physics.world || !three.renderer) return;
   sync3DCar(player);
   sync3DCar(ai);
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - (renderWorld._lastT || now)) / 1000);
+  renderWorld._lastT = now;
+  updateDust(dustPools.player, dt);
+  updateDust(dustPools.ai, dt);
   updateCamera();
   three.renderer.render(three.scene, three.camera);
 }
@@ -1367,6 +1482,8 @@ btnRestart.addEventListener('click', () => { btnStart.disabled = false; startRac
 // load — not just on Start — so the player object exists right away and
 // you can draw/mount a wheel before the race even begins.
 initThreeScene();
+dustPools.player = createDustPool(DUST_POOL_SIZE);
+dustPools.ai = createDustPool(DUST_POOL_SIZE);
 initWorld();
 resizeWorldCanvas();
 loop();
