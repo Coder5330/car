@@ -42,6 +42,10 @@ const MAX_CHASSIS_ANGULAR_VELOCITY = 0.03; // hard cap on chassis spin rate, per
 const CHASSIS_ANGULAR_DAMPING = 0.9; // fraction of chassis spin kept each animation frame
 const MIN_WHEEL_R = 22;
 const MAX_WHEEL_R = 42; // was 34 (and 46 before that) — too small to read as actually touching the ground under a 96-long chassis
+// Drawn outlines are scaled down by this to become physics wheels (see
+// pointsToPhysicsVertices). coldStartWheel back-solves through it to pick
+// sizes in physics-radius space, so it must stay a single shared number.
+const WHEEL_DRAW_SCALE = 0.32;
 const REFERENCE_WHEEL_R = (MIN_WHEEL_R + MAX_WHEEL_R) / 2; // see onBeforeUpdate — drive speed is normalized against this
 const WATER_PIT_DEPTH = 130; // how far below the normal ground line water's actual collision floor sits — see buildGroundBodies 'water' case
 const RACE_START_X = 60; // matches createCar's startX — where a flipped car gets sent back to
@@ -564,7 +568,7 @@ function currentWidthScale() {
 }
 
 function pointsToPhysicsVertices(points, features) {
-  const targetR = Math.max(MIN_WHEEL_R, Math.min(MAX_WHEEL_R, features.maxR * 0.32));
+  const targetR = Math.max(MIN_WHEEL_R, Math.min(MAX_WHEEL_R, features.maxR * WHEEL_DRAW_SCALE));
   const scale = features.maxR > 0 ? targetR / features.maxR : 1;
   const verts = points.map(p => ({
     x: (p.x - features.centroid.x) * scale,
@@ -1680,7 +1684,17 @@ async function aiGenerateWheel(terrainType) {
     // neighbors, which ±3px against a wheel-sized radius never does. This
     // compounds across AI generations imitating its own past output, so it
     // needs to hold on every jitter, not just the first one.
-    const points = sortPointsByAngle(pick.wheelPoints.map(([x, y]) => ({ x: x + (Math.random() - 0.5) * jitter, y: y + (Math.random() - 0.5) * jitter })));
+    // Jitter alone perturbs points independently, which mostly wanders the
+    // outline's irregularity and nets out to almost no change in overall
+    // SIZE — so size could never actually evolve toward what scores well.
+    // An explicit scale mutation makes size a real axis of search, which
+    // matters because size is one of the strongest predictors of score
+    // (a full-size round wheel scores ~100 on ice vs ~26 at minimum radius).
+    const sizeMutation = 1 + (Math.random() - 0.5) * 0.25;
+    const points = sortPointsByAngle(pick.wheelPoints.map(([x, y]) => ({
+      x: (x + (Math.random() - 0.5) * jitter) * sizeMutation,
+      y: (y + (Math.random() - 0.5) * jitter) * sizeMutation
+    })));
     // wheelFeatures[4] is widthScale (see submitExample) — without reading
     // this back, a stored example that scored well partly BECAUSE of a wide
     // tyre would get reconstructed at neutral 1x width every time the AI
@@ -1712,10 +1726,23 @@ async function aiGenerateWheel(terrainType) {
 function coldStartWheel(terrainType) {
   const n = 28;
   const pts = [];
-  const baseR = 34 + Math.random() * 34;
   const lobes = Math.random() < 0.25 ? 0 : 3 + Math.floor(Math.random() * 6);
   const depth = lobes === 0 ? 0 : 0.12 + Math.random() * 0.45;
   const squareTeeth = Math.random() < 0.5;
+  // Size is drawn in PHYSICS-radius space and back-solved into a drawing
+  // radius, rather than picking a drawing radius directly. Picking directly
+  // looks reasonable but silently cannot reach most of the size range:
+  // pointsToPhysicsVertices maps drawn maxR through WHEEL_DRAW_SCALE and then
+  // clamps to [MIN_WHEEL_R, MAX_WHEEL_R], so a full-size wheel needs a drawn
+  // maxR of MAX_WHEEL_R / WHEEL_DRAW_SCALE (131). The old range topped out
+  // around 107 and plain round rolls only reached 68 — measured over 400
+  // rolls, 60% of cold-start wheels came out pinned at the MINIMUM radius and
+  // none ever reached the maximum. Since a full-size round wheel scores ~100
+  // on ice and ~97-99 on stairs/sand/steep, the AI was structurally unable to
+  // discover the best wheel in the game no matter how long it trained.
+  // Dividing by (1 + depth) accounts for treads pushing maxR past the base.
+  const targetPhysR = MIN_WHEEL_R + Math.random() * (MAX_WHEEL_R - MIN_WHEEL_R);
+  const baseR = targetPhysR / WHEEL_DRAW_SCALE / (1 + depth);
   for (let i = 0; i < n; i++) {
     const a = (i / n) * Math.PI * 2;
     let tread = 0;
