@@ -777,7 +777,22 @@ function updateWheelMesh3D(car, localVertices) {
   shape.closePath();
   // Extrusion depth follows the tyre-width slider, so a "fat" tyre visibly
   // looks fat — the same number that drives its water/sand displacement.
-  const thickness = WHEEL_THICKNESS * ((car.wheelFeatures && car.wheelFeatures.widthScale) || 1);
+  //
+  // Capped against the wheel's own diameter, though: WHEEL_THICKNESS is an
+  // absolute constant, but the wheel's drawn size is not, and at the top of
+  // the slider (2.5x -> 40px) the extrusion was coming out THICKER than the
+  // wheel is tall (measured: 40 thick vs 36.5 diameter). That stops reading
+  // as a wheel at all — it's a cube — and on a spiky cold-start outline it
+  // renders as the chunky star-prism blob this was reported as. Keeping
+  // thickness under ~85% of the diameter stays clearly disc-like while
+  // still making max width look dramatically fatter than default.
+  const ys = localVertices.map(v => v.y), xs = localVertices.map(v => v.x);
+  const diameter = Math.max(Math.max(...ys) - Math.min(...ys), Math.max(...xs) - Math.min(...xs)) || WHEEL_THICKNESS;
+  const widthScale = (car.wheelFeatures && car.wheelFeatures.widthScale) || 1;
+  const thickness = Math.min(WHEEL_THICKNESS * widthScale, diameter * 0.85);
+  // Remembered so sync3DCar can push a fat tyre outboard instead of letting
+  // it grow inward through the chassis (see there).
+  car.wheelMeshThickness = thickness;
   const geo = new THREE.ExtrudeGeometry(shape, { depth: thickness, bevelEnabled: false, steps: 1 });
   geo.rotateY(Math.PI / 2);
   geo.translate(-thickness / 2, 0, 0);
@@ -814,12 +829,19 @@ function sync3DCar(car) {
     // mapping is scene-Z = -physics-x, the LOCAL z offsets are the mirror
     // of those physics offsets (rear -> +Z, front -> -Z).
     const localOffsetRear = 32, localOffsetFront = -32;
+    // A fat tyre grows outboard, not inboard: TRACK_HALF_WIDTH positions the
+    // wheel's CENTRE, so extra thickness would otherwise expand equally in
+    // both directions and bury the inner half inside the 58-wide chassis.
+    // Offsetting by half the extra thickness pins the inner face where a
+    // default-width tyre's inner face sits, so wider tyres stick out the way
+    // real ones do instead of clipping through the bodywork.
+    const halfTrack = TRACK_HALF_WIDTH + Math.max(0, (car.wheelMeshThickness || WHEEL_THICKNESS) - WHEEL_THICKNESS) / 2;
     [m.wheelRL, m.wheelRR].forEach(w => {
-      w.position.set(w === m.wheelRL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, -16, localOffsetRear);
+      w.position.set(w === m.wheelRL ? -halfTrack : halfTrack, -16, localOffsetRear);
       w.rotation.x = -car.wheelA.angle;
     });
     [m.wheelFL, m.wheelFR].forEach(w => {
-      w.position.set(w === m.wheelFL ? -TRACK_HALF_WIDTH : TRACK_HALF_WIDTH, -16, localOffsetFront);
+      w.position.set(w === m.wheelFL ? -halfTrack : halfTrack, -16, localOffsetFront);
       w.rotation.x = -car.wheelB.angle;
     });
   }
