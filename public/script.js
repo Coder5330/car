@@ -1373,7 +1373,18 @@ function onBeforeUpdate() {
         const overspeed = speed - ICE_SAFE_SPEED;
         const severity = Math.min(1, overspeed / 4);
         Body.setVelocity(car.chassis, { x: car.chassis.velocity.x - overspeed * 0.12, y: car.chassis.velocity.y });
-        Body.setAngularVelocity(car.chassis, car.chassis.angularVelocity + car.iceSlipDir * severity * 0.012 * PHYSICS_SUBSTEPS);
+        // The destabilizing spin fades out as the car actually tilts, so ice
+        // is a slide-and-wobble you can ride out rather than a guaranteed
+        // flip. Without the fade this added angular velocity every single
+        // frame you were overspeed, pinning it at the clamp within about a
+        // second — so crossing the speed threshold at all meant certain
+        // death. Measured under that version: a plain round wheel flipped
+        // 12/12 runs and only one narrow tread depth was survivable, which
+        // is what kept live ice scores stuck in the 30s. Capping the push at
+        // ~50 degrees leaves gravity able to settle the car back down.
+        const iceTilt = Math.abs(Math.atan2(Math.sin(car.chassis.angle), Math.cos(car.chassis.angle)));
+        const tiltFade = Math.max(0, 1 - iceTilt / 1.45);
+        Body.setAngularVelocity(car.chassis, car.chassis.angularVelocity + car.iceSlipDir * severity * 0.012 * PHYSICS_SUBSTEPS * tiltFade);
       } else {
         car.iceSlipDir = null;
       }
@@ -1686,15 +1697,36 @@ async function aiGenerateWheel(terrainType) {
   }
 }
 
+// The AI's random-exploration wheel. This used to be per-vertex noise
+// (radius jittered +-45% independently across only 10-15 points), which
+// can't produce a wheel — every roll came out a lopsided blob, which is
+// both what made the AI's wheels look broken and why its random rolls
+// almost never found anything good.
+//
+// Now it rolls a STRUCTURED wheel instead: a size, a tread count, a tread
+// depth, and square-vs-smooth treads. That family spans the axes the game
+// actually scores on (roundness, tread count, tread depth, size) — plain
+// round wheels, paddle wheels, gear/toothed wheels — so exploration stays
+// wide while every roll is a plausible wheel. Mirrored in
+// lib/autotrainSim.js, keep in sync.
 function coldStartWheel(terrainType) {
-  // Day-1 AI: mostly clueless, occasionally stumbles onto something sensible.
-  const n = 10 + Math.floor(Math.random() * 6);
+  const n = 28;
   const pts = [];
-  const baseR = 30 + Math.random() * 40;
+  const baseR = 34 + Math.random() * 34;
+  const lobes = Math.random() < 0.25 ? 0 : 3 + Math.floor(Math.random() * 6);
+  const depth = lobes === 0 ? 0 : 0.12 + Math.random() * 0.45;
+  const squareTeeth = Math.random() < 0.5;
   for (let i = 0; i < n; i++) {
     const a = (i / n) * Math.PI * 2;
-    const noise = (Math.random() - 0.5) * baseR * 0.9;
-    pts.push({ x: Math.cos(a) * (baseR + noise), y: Math.sin(a) * (baseR + noise) });
+    let tread = 0;
+    if (lobes > 0) {
+      const wave = Math.sin(a * lobes);
+      tread = squareTeeth ? (wave > 0 ? 1 : 0) : wave * 0.5 + 0.5;
+    }
+    // Small jitter so repeated rolls aren't perfectly regular, but far too
+    // little to break the shape's structure.
+    const r = baseR * (1 + depth * tread) * (1 + (Math.random() - 0.5) * 0.06);
+    pts.push({ x: Math.cos(a) * r, y: Math.sin(a) * r });
   }
   return pts;
 }
