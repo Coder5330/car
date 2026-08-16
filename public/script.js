@@ -576,7 +576,7 @@ function pointsToPhysicsVertices(points, features) {
   // Bodies.fromVertices (in mountWheels) will decompose this into convex
   // parts using poly-decomp — the shape only falls back to its convex hull
   // if that decomposition genuinely fails (self-intersecting drawing etc).
-  const vertices = Vertices.clockwiseSort(verts);
+  const vertices = sanitizeVertexLoop(Vertices.clockwiseSort(verts));
   // "radius" (farthest vertex from center) is only a good stand-in for how
   // far the wheel reaches DOWNWARD when the shape is roughly circular. A
   // hand-drawn wheel is usually lopsided — its farthest point might stick
@@ -738,10 +738,40 @@ function build3DCarMeshes(car) {
   car.mesh3D = { group, chassisMesh, wheelFL, wheelFR, wheelRL, wheelRR };
 }
 
+// Drops non-finite coordinates and collapses near-duplicate consecutive
+// points before handing a loop to THREE's ear-clipping triangulator.
+// ExtrudeGeometry/ShapeUtils don't fail loudly on degenerate input (NaN
+// from a corrupted stored point, or a cluster of near-coincident points
+// from a densely hand-drawn stroke plus jitter) — they silently produce
+// garbage triangles that render as a jumbled cluster of disconnected
+// shards instead of a wheel. Matter's own Vertices.clockwiseSort (run
+// earlier, in pointsToPhysicsVertices) already guarantees a simple
+// (non-self-intersecting) polygon, so that specific failure mode is ruled
+// out — this catches the remaining ones.
+function sanitizeVertexLoop(vertices) {
+  const MIN_GAP = 0.75;
+  const clean = [];
+  for (const v of vertices) {
+    if (!Number.isFinite(v.x) || !Number.isFinite(v.y)) continue;
+    const prev = clean[clean.length - 1];
+    if (prev && Math.hypot(v.x - prev.x, v.y - prev.y) < MIN_GAP) continue;
+    clean.push(v);
+  }
+  if (clean.length > 1 && Math.hypot(clean[0].x - clean[clean.length - 1].x, clean[0].y - clean[clean.length - 1].y) < MIN_GAP) {
+    clean.pop();
+  }
+  if (clean.length < 3) {
+    const n = 12, r = 24;
+    return Array.from({ length: n }, (_, i) => { const a = (i / n) * Math.PI * 2; return { x: Math.cos(a) * r, y: Math.sin(a) * r }; });
+  }
+  return clean;
+}
+
 // Rebuilds the wheel meshes' geometry from the same local vertices used for
 // the physics body, so what you drew is exactly what climbs the terrain AND
 // exactly what's shown — extruded sideways into a real 3D tire profile.
 function updateWheelMesh3D(car, localVertices) {
+  localVertices = sanitizeVertexLoop(localVertices);
   const shape = new THREE.Shape();
   localVertices.forEach((v, i) => i === 0 ? shape.moveTo(v.x, -v.y) : shape.lineTo(v.x, -v.y));
   shape.closePath();
