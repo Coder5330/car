@@ -735,7 +735,7 @@ function build3DCarMeshes(car) {
   [wheelFL, wheelFR, wheelRL, wheelRR].forEach(m => group.add(m));
 
   three.scene.add(group);
-  car.mesh3D = { group, chassisMesh, wheelFL, wheelFR, wheelRL, wheelRR };
+  car.mesh3D = { group, chassisMesh, cabMesh, wheelFL, wheelFR, wheelRL, wheelRR };
 }
 
 // Drops non-finite coordinates and collapses near-duplicate consecutive
@@ -804,6 +804,20 @@ function updateWheelMesh3D(car, localVertices) {
   [m.wheelRL, m.wheelRR].forEach(w => { w.geometry = geo2; });
   if (oldGeo && oldGeo.dispose) oldGeo.dispose();
   if (oldGeo2 && oldGeo2.dispose && oldGeo2 !== oldGeo) oldGeo2.dispose();
+
+  // Ride the body over big wheels instead of letting them swallow it. The
+  // body box is 22 tall around y=0 (top at +11) while wheels sit at y=-16,
+  // so any wheel reaching more than 27 above its own centre pokes out
+  // through the roof — and the drawn radius goes up to MAX_WHEEL_R (42),
+  // which clears the roof by a full body-height. Wheel placement can't just
+  // be dropped to compensate (it's what puts the tyre on the ground), so
+  // the body lifts instead, giving a monster-truck stance for big wheels
+  // and changing nothing for normal ones.
+  geo.computeBoundingBox();
+  const wheelTop = -16 + geo.boundingBox.max.y; // group-local, y-up
+  const lift = Math.max(0, wheelTop - 11);
+  m.chassisMesh.position.y = lift;
+  if (m.cabMesh) m.cabMesh.position.y = 20 + lift;
 }
 
 // Copies live physics transforms onto the 3D meshes. Mapping convention:
